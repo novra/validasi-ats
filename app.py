@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 from streamlit_gsheets import GSheetsConnection
+import time
 
 # --- KONFIGURASI HALAMAN ---
 st.set_page_config(layout="wide", page_title="Online ATS Validator")
@@ -32,12 +33,17 @@ st.markdown("""
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 def load_data():
-    # Baca data, force sebagai string untuk menghindari error tipe data
-    return conn.read(worksheet="Sheet1", ttl=5)
+    # TTL 0 berarti jangan cache terlalu lama saat development/debugging
+    return conn.read(worksheet="Sheet1", ttl=0) 
 
 def update_data(df):
-    conn.update(worksheet="Sheet1", data=df)
-    st.cache_data.clear()
+    try:
+        conn.update(worksheet="Sheet1", data=df)
+        st.cache_data.clear() # Wajib clear cache agar data baru terbaca
+        return True
+    except Exception as e:
+        st.error(f"Gagal menyimpan ke Google Sheets: {e}")
+        return False
 
 def show_ats_guidance():
     with st.expander("📘 PANDUAN TRIASE ATS (KLIK UNTUK MEMBUKA)", expanded=False):
@@ -75,17 +81,16 @@ if st.sidebar.button("Logout"):
 st.title("🏥 Validator ATS Online")
 show_ats_guidance()
 
+# --- LOAD & CLEAN DATA ---
 try:
     df = load_data()
     
-    # --- PERBAIKAN UTAMA DISINI ---
-    # 1. Pastikan kolom ada
+    # Pastikan kolom wajib ada
     for col in ['validator', 'instruction_ats', 'status']:
         if col not in df.columns:
             df[col] = ""
             
-    # 2. KONVERSI KE STRING (PENTING AGAR TIDAK ERROR)
-    # Kita ubah NaN menjadi string kosong "" dan paksa tipe data jadi string
+    # KONVERSI KE STRING (PENTING)
     df['validator'] = df['validator'].astype(str).replace('nan', '')
     df['instruction_ats'] = df['instruction_ats'].astype(str).replace('nan', '')
     df['status'] = df['status'].astype(str).replace('nan', '')
@@ -94,18 +99,99 @@ except Exception as e:
     st.error(f"Gagal memuat data. Error: {e}")
     st.stop()
 
-# Filter Data (Sekarang aman karena sudah pasti string)
-unassigned_mask = df['validator'].str.strip() == ""
+# --- LOGIKA FILTER ---
+# Strip whitespace agar spasi tidak dianggap karakter
+unassigned_mask = (df['validator'].str.strip() == "") | (df['validator'] == "nan")
 my_rows_mask = df['validator'] == username
 
-st.sidebar.divider()
-st.sidebar.metric("Sisa Belum Diambil", len(df[unassigned_mask]))
-st.sidebar.metric("Tugas Saya", len(df[my_rows_mask]))
+sisa_tugas = len(df[unassigned_mask])
+tugas_saya = len(df[my_rows_mask])
 
-# Ambil Tugas
-if len(df[my_rows_mask]) == 0 and len(df[unassigned_mask]) > 0:
-    st.info("Anda belum memiliki tugas aktif.")
-    with st.form("ambil_tugas"):
-        batch_size = st.number_input("Ambil baris data:", min_value=5, max_value=50, value=10)
-        if st.form_submit_button("Ambil Tugas"):
-            available_indices = df[unassigned_mask].head(batch_size).index
+st.sidebar.divider()
+st.sidebar.metric("Sisa Data Belum Diambil", sisa_tugas)
+st.sidebar.metric("Tugas Saya", tugas_saya)
+
+# --- BAGIAN AMBIL TUGAS ---
+# Hanya muncul jika user belum punya tugas ATAU tugas sudah selesai semua tapi masih mau ambil lagi
+if tugas_saya == 0 and sisa_tugas > 0:
+    st.info("👋 Halo! Anda belum memiliki tugas aktif.")
+    
+    with st.form("ambil_tugas_form"):
+        st.write("Pilih jumlah data yang ingin divalidasi:")
+        batch_size = st.number_input("Jumlah baris:", min_value=5, max_value=50, value=10)
+        
+        # Tombol Submit
+        submitted = st.form_submit_button("🚀 Ambil Tugas Sekarang")
+        
+        if submitted:
+            # Cek lagi ketersediaan data di dalam blok submit
+            current_indices = df[unassigned_mask].head(batch_size).index
+            
+            if len(current_indices) == 0:
+                st.error("Maaf, data sudah habis diambil orang lain barusan!")
+            else:
+                with st.spinner("Sedang mengunci data untuk Anda di Google Sheets..."):
+                    # Lakukan update
+                    df.loc[current_indices, 'validator'] = username
+                    
+                    # Simpan ke Cloud
+                    success = update_data(df)
+                    
+                    if success:
+                        st.success(f"Berhasil mengambil {len(current_indices)} data!")
+                        time.sleep(1) # Jeda sebentar agar user lihat pesan sukses
+                        st.rerun()
+                    else:
+                        st.error("Gagal menyimpan. Coba lagi.")
+
+# --- BAGIAN AREA KERJA ---
+user_df = df[df['validator'] == username].copy()
+
+if not user_df.empty:
+    st.subheader(f"📝 Area Kerja Anda (Batch {len(user_df)} data)")
+    st.info("Tips: Data tersimpan otomatis ke Google Sheets setiap kali Anda menekan tombol 'Simpan'.")
+
+    for index, row in user_df.iterrows():
+        with st.container():
+            st.markdown(f"### Data #{index + 1}")
+            c1, c2, c3 = st.columns(3)
+            
+            # Tampilan 3 Kolom Scrollable
+            with c1:
+                st.markdown(f"<span class='box-header'>Instruction / Konteks</span><div class='scroll-box'>{row.get('instruction', '-')}</div>", unsafe_allow_html=True)
+            with c2:
+                st.markdown(f"<span class='box-header'>Input Pasien</span><div class='scroll-box'>{row.get('input', '-')}</div>", unsafe_allow_html=True)
+            with c3:
+                st.markdown(f"<span class='box-header'>Output / Respons Awal</span><div class='scroll-box'>{row.get('output', '-')}</div>", unsafe_allow_html=True)
+            
+            # Input Area
+            st.markdown("<span class='box-header' style='color:#b45309; margin-top:10px;'>👉 Instruction ATS (Wajib Diisi)</span>", unsafe_allow_html=True)
+            
+            # Unique key untuk text area sangat penting agar tidak reset saat mengetik
+            new_val = st.text_area(
+                label="Input ATS", 
+                value=row['instruction_ats'], 
+                height=150,
+                label_visibility="collapsed", 
+                key=f"txt_{index}",
+                placeholder="Masukkan instruksi ATS di sini..."
+            )
+            
+            # Tombol Simpan Per Baris
+            col_btn, col_info = st.columns([1, 5])
+            with col_btn:
+                if st.button(f"💾 Simpan #{index+1}", key=f"btn_{index}", type="primary"):
+                    with st.spinner("Menyimpan..."):
+                        df.at[index, 'instruction_ats'] = new_val
+                        df.at[index, 'status'] = "Done"
+                        update_data(df)
+                        st.toast(f"Baris #{index+1} tersimpan!", icon="✅")
+            with col_info:
+                if row.get('status') == 'Done':
+                    st.markdown("✅ **Tersimpan di Cloud**")
+            
+            st.divider()
+
+elif sisa_tugas == 0 and tugas_saya == 0:
+    st.balloons()
+    st.success("🎉 Luar biasa! Semua data dalam spreadsheet telah selesai divalidasi oleh tim.")
