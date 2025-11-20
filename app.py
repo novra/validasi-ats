@@ -33,13 +33,12 @@ st.markdown("""
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 def load_data():
-    # TTL 0 berarti jangan cache terlalu lama saat development/debugging
     return conn.read(worksheet="Sheet1", ttl=0) 
 
 def update_data(df):
     try:
         conn.update(worksheet="Sheet1", data=df)
-        st.cache_data.clear() # Wajib clear cache agar data baru terbaca
+        st.cache_data.clear()
         return True
     except Exception as e:
         st.error(f"Gagal menyimpan ke Google Sheets: {e}")
@@ -81,117 +80,138 @@ if st.sidebar.button("Logout"):
 st.title("🏥 Validator ATS Online")
 show_ats_guidance()
 
-# --- LOAD & CLEAN DATA ---
+# --- LOAD DATA ---
 try:
     df = load_data()
-    
-    # Pastikan kolom wajib ada
     for col in ['validator', 'instruction_ats', 'status']:
-        if col not in df.columns:
-            df[col] = ""
-            
-    # KONVERSI KE STRING (PENTING)
+        if col not in df.columns: df[col] = ""
+    
+    # KONVERSI DATA KE STRING
     df['validator'] = df['validator'].astype(str).replace('nan', '')
     df['instruction_ats'] = df['instruction_ats'].astype(str).replace('nan', '')
     df['status'] = df['status'].astype(str).replace('nan', '')
     
 except Exception as e:
-    st.error(f"Gagal memuat data. Error: {e}")
+    st.error(f"Gagal memuat data: {e}")
     st.stop()
 
-# --- LOGIKA FILTER ---
-# Strip whitespace agar spasi tidak dianggap karakter
+# --- LOGIKA BARU (PENDING vs DONE) ---
+# 1. Cari data yang belum diambil siapapun
 unassigned_mask = (df['validator'].str.strip() == "") | (df['validator'] == "nan")
-my_rows_mask = df['validator'] == username
 
-sisa_tugas = len(df[unassigned_mask])
-tugas_saya = len(df[my_rows_mask])
+# 2. Cari data milik user ini
+my_all_tasks = df[df['validator'] == username]
+
+# 3. Cari data milik user ini yang BELUM SELESAI (Status bukan 'Done')
+my_pending_tasks = my_all_tasks[my_all_tasks['status'] != 'Done']
+
+# Hitung Statistik
+sisa_pool = len(df[unassigned_mask])
+total_dikerjakan_saya = len(my_all_tasks)
+sisa_tugas_saya = len(my_pending_tasks)
 
 st.sidebar.divider()
-st.sidebar.metric("Sisa Data Belum Diambil", sisa_tugas)
-st.sidebar.metric("Tugas Saya", tugas_saya)
+st.sidebar.metric("Sisa Data Global", sisa_pool)
+st.sidebar.metric("Total Tugas Saya", total_dikerjakan_saya)
+st.sidebar.metric("Sisa Tugas Aktif", sisa_tugas_saya)
 
-# --- BAGIAN AMBIL TUGAS ---
-# Hanya muncul jika user belum punya tugas ATAU tugas sudah selesai semua tapi masih mau ambil lagi
-if tugas_saya == 0 and sisa_tugas > 0:
-    st.info("👋 Halo! Anda belum memiliki tugas aktif.")
+# --- BAGIAN AMBIL TUGAS (LOGIKA DIPERBAIKI) ---
+# Tombol ambil tugas muncul jika TIDAK ADA tugas aktif (pending == 0).
+# Jadi walaupun total tugas saya 10, tapi kalau semuanya 'Done', form ini akan muncul lagi.
+
+if sisa_tugas_saya == 0 and sisa_pool > 0:
+    if total_dikerjakan_saya > 0:
+        st.success("🎉 Hebat! Anda telah menyelesaikan semua tugas sebelumnya. Siap ambil lagi?")
+    else:
+        st.info("👋 Halo! Anda belum memiliki tugas aktif.")
     
     with st.form("ambil_tugas_form"):
-        st.write("Pilih jumlah data yang ingin divalidasi:")
+        st.write("Ambil paket data baru:")
         batch_size = st.number_input("Jumlah baris:", min_value=5, max_value=50, value=10)
-        
-        # Tombol Submit
-        submitted = st.form_submit_button("🚀 Ambil Tugas Sekarang")
+        submitted = st.form_submit_button("🚀 Ambil Tugas Baru")
         
         if submitted:
-            # Cek lagi ketersediaan data di dalam blok submit
             current_indices = df[unassigned_mask].head(batch_size).index
-            
             if len(current_indices) == 0:
-                st.error("Maaf, data sudah habis diambil orang lain barusan!")
+                st.error("Data habis diambil orang lain!")
             else:
-                with st.spinner("Sedang mengunci data untuk Anda di Google Sheets..."):
-                    # Lakukan update
+                with st.spinner("Mengambil data..."):
                     df.loc[current_indices, 'validator'] = username
-                    
-                    # Simpan ke Cloud
-                    success = update_data(df)
-                    
-                    if success:
-                        st.success(f"Berhasil mengambil {len(current_indices)} data!")
-                        time.sleep(1) # Jeda sebentar agar user lihat pesan sukses
+                    if update_data(df):
+                        st.success(f"Berhasil mengambil {len(current_indices)} data baru!")
+                        time.sleep(1)
                         st.rerun()
-                    else:
-                        st.error("Gagal menyimpan. Coba lagi.")
 
-# --- BAGIAN AREA KERJA ---
-user_df = df[df['validator'] == username].copy()
+# --- BAGIAN AREA KERJA (HANYA MENAMPILKAN TUGAS AKTIF) ---
+# Kita filter agar yang ditampilkan di layar kerja HANYA yang belum selesai
+# agar user fokus pada tugas barunya.
 
-if not user_df.empty:
-    st.subheader(f"📝 Area Kerja Anda (Batch {len(user_df)} data)")
-    st.info("Tips: Data tersimpan otomatis ke Google Sheets setiap kali Anda menekan tombol 'Simpan'.")
+# Jika ingin melihat history (yang sudah Done), bisa dibuat toggle opsional
+show_history = st.checkbox("Tampilkan tugas yang sudah selesai (History)", value=False)
 
-    for index, row in user_df.iterrows():
+if show_history:
+    # Tampilkan semua tugas (Active + Done)
+    working_df = my_all_tasks.copy()
+else:
+    # Tampilkan hanya tugas aktif (Pending)
+    working_df = my_pending_tasks.copy()
+
+if not working_df.empty:
+    st.subheader(f"📝 Area Kerja ({len(working_df)} data)")
+    
+    # Urutkan agar tugas yang belum selesai muncul paling atas
+    # working_df = working_df.sort_values(by='status', ascending=True) 
+
+    for index, row in working_df.iterrows():
         with st.container():
-            st.markdown(f"### Data #{index + 1}")
+            # Tanda visual jika sudah selesai
+            is_done = row.get('status') == 'Done'
+            status_icon = "✅ SELESAI" if is_done else "⏳ BELUM SELESAI"
+            bg_color = "#dcfce7" if is_done else "white"
+            
+            st.markdown(f"### Data #{index + 1} - {status_icon}")
+            
             c1, c2, c3 = st.columns(3)
-            
-            # Tampilan 3 Kolom Scrollable
             with c1:
-                st.markdown(f"<span class='box-header'>Instruction / Konteks</span><div class='scroll-box'>{row.get('instruction', '-')}</div>", unsafe_allow_html=True)
+                st.markdown(f"<span class='box-header'>Instruction</span><div class='scroll-box'>{row.get('instruction', '-')}</div>", unsafe_allow_html=True)
             with c2:
-                st.markdown(f"<span class='box-header'>Input Pasien</span><div class='scroll-box'>{row.get('input', '-')}</div>", unsafe_allow_html=True)
+                st.markdown(f"<span class='box-header'>Input</span><div class='scroll-box'>{row.get('input', '-')}</div>", unsafe_allow_html=True)
             with c3:
-                st.markdown(f"<span class='box-header'>Output / Respons Awal</span><div class='scroll-box'>{row.get('output', '-')}</div>", unsafe_allow_html=True)
+                st.markdown(f"<span class='box-header'>Output</span><div class='scroll-box'>{row.get('output', '-')}</div>", unsafe_allow_html=True)
             
-            # Input Area
-            st.markdown("<span class='box-header' style='color:#b45309; margin-top:10px;'>👉 Instruction ATS (Wajib Diisi)</span>", unsafe_allow_html=True)
+            st.markdown("<span class='box-header' style='color:#b45309; margin-top:10px;'>👉 Instruction ATS</span>", unsafe_allow_html=True)
             
-            # Unique key untuk text area sangat penting agar tidak reset saat mengetik
             new_val = st.text_area(
                 label="Input ATS", 
                 value=row['instruction_ats'], 
                 height=150,
                 label_visibility="collapsed", 
                 key=f"txt_{index}",
-                placeholder="Masukkan instruksi ATS di sini..."
+                placeholder="Isi instruksi ATS...",
+                disabled=False # Bisa diubah true jika ingin mengunci data yang sudah Done
             )
             
-            # Tombol Simpan Per Baris
             col_btn, col_info = st.columns([1, 5])
             with col_btn:
-                if st.button(f"💾 Simpan #{index+1}", key=f"btn_{index}", type="primary"):
+                # Ubah teks tombol jika sudah selesai
+                btn_label = "💾 Update" if is_done else "💾 Simpan"
+                if st.button(f"{btn_label} #{index+1}", key=f"btn_{index}", type="primary"):
                     with st.spinner("Menyimpan..."):
                         df.at[index, 'instruction_ats'] = new_val
                         df.at[index, 'status'] = "Done"
                         update_data(df)
-                        st.toast(f"Baris #{index+1} tersimpan!", icon="✅")
-            with col_info:
-                if row.get('status') == 'Done':
-                    st.markdown("✅ **Tersimpan di Cloud**")
+                        st.toast("Tersimpan!", icon="✅")
+                        # Opsional: Rerun agar data hilang dari list 'Pending' jika mode history mati
+                        if not show_history: 
+                            time.sleep(0.5)
+                            st.rerun()
             
             st.divider()
 
-elif sisa_tugas == 0 and tugas_saya == 0:
+elif sisa_pool == 0 and sisa_tugas_saya == 0:
     st.balloons()
-    st.success("🎉 Luar biasa! Semua data dalam spreadsheet telah selesai divalidasi oleh tim.")
+    st.success("🎉 Semua data global telah habis dan selesai divalidasi!")
+else:
+    # Kondisi aneh: punya tugas selesai, tapi pool habis, dll.
+    if sisa_pool == 0:
+         st.warning("Tidak ada data baru yang tersedia.")
