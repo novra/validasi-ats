@@ -1,0 +1,39 @@
+# Streamlit secrets
+.streamlit/secrets.toml
+.streamlit/*.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Cache
+.cache/
+*.cache
+.pytest_cache/
+
+# OS
+Thumbs.db
+desktop.ini
+
+# Data
+*.csv
+*.xlsx
+*.json
+!requirements.json

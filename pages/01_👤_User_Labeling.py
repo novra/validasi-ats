@@ -55,12 +55,20 @@ st.markdown("""
 # --- KONEKSI KE GOOGLE SHEETS ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 
+@st.cache_data(ttl=0)
 def load_data():
-    return conn.read(worksheet="Sheet1", ttl=0) 
+    try:
+        df = conn.read(worksheet="Sheet1", ttl=0)
+        return df
+    except Exception as e:
+        st.error(f"❌ Error membaca Google Sheet: {e}")
+        return None
 
 def update_data(df):
     try:
         conn.update(worksheet="Sheet1", data=df)
+        # Clear cache untuk force reload data
+        load_data.clear()
         st.cache_data.clear()
         return True
     except Exception as e:
@@ -132,8 +140,24 @@ show_ats_guidance()
 # --- LOAD DATA ---
 try:
     df = load_data()
+    
+    if df is None or df.empty:
+        st.error("❌ Data dari Google Sheet kosong atau tidak dapat diakses!")
+        st.info("💡 Pastikan:")
+        st.info("   1. Google Sheet sudah dikonfigurasi di Streamlit secrets")
+        st.info("   2. Sheet memiliki kolom: input, nama_validator, status, instruksi_ats, output_ats")
+        st.info("   3. Data sudah tersedia di Sheet1")
+        st.stop()
+    
+    # Cek kolom yang tersedia
+    missing_cols = []
     for col in ['nama_validator', 'instruksi_ats', 'status', 'input', 'output_ats']:
-        if col not in df.columns: df[col] = ""
+        if col not in df.columns:
+            missing_cols.append(col)
+            df[col] = ""
+    
+    if missing_cols:
+        st.warning(f"⚠️ Kolom yang dibuat otomatis: {missing_cols}")
     
     # KONVERSI DATA KE STRING
     df['nama_validator'] = df['nama_validator'].astype(str).replace('nan', '').str.strip()
@@ -145,8 +169,21 @@ try:
     # Filter hanya data yang memiliki input (tidak kosong)
     df = df[df['input'] != '']
     
+    # Debug info (untuk test purposes)
+    if 'debug_mode' not in st.session_state:
+        st.session_state['debug_mode'] = False
+    
+    # Show debug toggle di sidebar
+    if st.sidebar.checkbox("🔍 Debug Mode", value=False):
+        st.sidebar.write(f"**Total baris Google Sheet:** {len(df)}")
+        st.sidebar.write(f"**Kolom yang ada:** {list(df.columns)}")
+        st.sidebar.write("**Data Preview:**")
+        st.sidebar.dataframe(df.head(3), use_container_width=True)
+    
 except Exception as e:
-    st.error(f"Gagal memuat data: {e}")
+    st.error(f"❌ Gagal memuat data: {e}")
+    import traceback
+    st.error(traceback.format_exc())
     st.stop()
 
 # --- LOGIKA DATA TERSEDIA (PENDING vs DONE) ---
