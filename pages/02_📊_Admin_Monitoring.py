@@ -54,12 +54,16 @@ try:
     if 'instruksi_ats' in df.columns and 'instruction_ats' not in df.columns:
         df.rename(columns={'instruksi_ats': 'instruction_ats'}, inplace=True)
     
-    # KONVERSI DATA KE STRING
-    df['validator'] = df['validator'].astype(str).replace('nan', '').str.strip()
-    df['instruction_ats'] = df['instruction_ats'].astype(str).replace('nan', '').str.strip()
-    df['status'] = df['status'].astype(str).replace('nan', '').str.strip()
-    df['input'] = df['input'].astype(str).replace('nan', '').str.strip()
-    df['output_ats'] = df['output_ats'].astype(str).replace('nan', '').str.strip()
+    # KONVERSI DATA KE STRING - LEBIH ROBUST
+    # Handle NaN, None, dan nilai null lainnya
+    for col in ['validator', 'instruction_ats', 'status', 'input', 'output_ats']:
+        df[col] = df[col].fillna('').astype(str).str.strip()
+        # Hilangkan string 'nan' 
+        df[col] = df[col].replace('nan', '').str.strip()
+        # Hilangkan 'none' (case-insensitive)
+        df[col] = df[col].mask(df[col].str.lower() == 'none', '')
+        # Final strip setelah semua cleaning
+        df[col] = df[col].str.strip()
     
     # Filter hanya data yang memiliki input (tidak kosong)
     df = df[df['input'] != '']

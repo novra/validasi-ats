@@ -167,12 +167,16 @@ try:
         if col not in df.columns:
             df[col] = ""
     
-    # KONVERSI DATA KE STRING
-    df['validator'] = df['validator'].astype(str).replace('nan', '').str.strip()
-    df['instruction_ats'] = df['instruction_ats'].astype(str).replace('nan', '').str.strip()
-    df['status'] = df['status'].astype(str).replace('nan', '').str.strip()
-    df['input'] = df['input'].astype(str).replace('nan', '').str.strip()
-    df['output_ats'] = df['output_ats'].astype(str).replace('nan', '').str.strip()
+    # KONVERSI DATA KE STRING - LEBIH ROBUST
+    # Handle NaN, None, dan nilai null lainnya
+    for col in required_cols:
+        df[col] = df[col].fillna('').astype(str).str.strip()
+        # Hilangkan string 'nan' 
+        df[col] = df[col].replace('nan', '').str.strip()
+        # Hilangkan 'none' (case-insensitive)
+        df[col] = df[col].mask(df[col].str.lower() == 'none', '')
+        # Final strip setelah semua cleaning
+        df[col] = df[col].str.strip()
     
     # Filter hanya data yang memiliki input (tidak kosong)
     df = df[df['input'] != '']
@@ -185,8 +189,32 @@ try:
     if st.sidebar.checkbox("🔍 Debug Mode", value=False):
         st.sidebar.write(f"**Total baris Google Sheet:** {len(df)}")
         st.sidebar.write(f"**Kolom yang ada:** {list(df.columns)}")
+        
+        # Debug breakdown untuk data availability
+        st.sidebar.divider()
+        st.sidebar.write("**DEBUG: Data Availability Breakdown**")
+        
+        data_with_input = len(df[df['input'] != ''])
+        data_with_empty_validator = len(df[df['validator'] == ''])
+        data_with_empty_status = len(df[df['status'] == ''])
+        data_with_done_status = len(df[df['status'] == 'Done'])
+        data_with_empty_or_done = len(df[(df['status'] == '') | (df['status'] == 'Done')])
+        
+        st.sidebar.write(f"✓ Data dengan input terisi: {data_with_input}")
+        st.sidebar.write(f"✓ Data dengan validator kosong: {data_with_empty_validator}")
+        st.sidebar.write(f"✓ Data dengan status kosong: {data_with_empty_status}")
+        st.sidebar.write(f"✓ Data dengan status 'Done': {data_with_done_status}")
+        st.sidebar.write(f"✓ Data dengan status kosong/Done: {data_with_empty_or_done}")
+        
+        available_count = len(df[(df['input'] != '') & (df['validator'] == '') & ((df['status'] == '') | (df['status'] == 'Done'))])
+        st.sidebar.write(f"🎯 **DATA TERSEDIA (kombinasi ketiga kondisi): {available_count}**")
+        
+        st.sidebar.divider()
         st.sidebar.write("**Data Preview:**")
         st.sidebar.dataframe(df.head(3), use_container_width=True)
+        
+        st.sidebar.write("**Status Values (Sample):**")
+        st.sidebar.write(df[['input', 'validator', 'status']].head(10))
     
 except Exception as e:
     st.error(f"❌ Gagal memuat data: {e}")
