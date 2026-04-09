@@ -1,217 +1,153 @@
 import streamlit as st
-import pandas as pd
-from streamlit_gsheets import GSheetsConnection
-import time
 
 # --- KONFIGURASI HALAMAN ---
-st.set_page_config(layout="wide", page_title="Online ATS Validator")
+st.set_page_config(
+    layout="centered",
+    page_title="Aplikasi Pelabelan ATS",
+    initial_sidebar_state="collapsed"
+)
 
 # --- CSS KUSTOM ---
 st.markdown("""
 <style>
-    .scroll-box {
-        height: 300px; overflow-y: auto; padding: 15px;
-        border: 1px solid #e5e7eb; border-radius: 8px;
-        background-color: #f9fafb; font-size: 14px; color: #1f2937;
+    .hero-section {
+        padding: 40px 30px;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        border-radius: 12px;
+        color: white;
+        margin-bottom: 30px;
+        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+        text-align: center;
     }
-    .box-header {
-        font-weight: bold; text-transform: uppercase; font-size: 12px;
-        margin-bottom: 8px; color: #6b7280; display: block;
+    
+    .hero-section h1 {
+        font-size: 2.2em;
+        margin: 0 0 10px 0;
     }
-    /* Warna Kategori ATS */
-    .ats-cat-1 { background-color: #fee2e2; color: #991b1b; padding: 10px; border-radius: 5px; border: 1px solid #fca5a5; }
-    .ats-cat-2 { background-color: #ffedd5; color: #9a3412; padding: 10px; border-radius: 5px; border: 1px solid #fdba74; }
-    .ats-cat-3 { background-color: #dcfce7; color: #166534; padding: 10px; border-radius: 5px; border: 1px solid #86efac; }
-    .ats-cat-4 { background-color: #dbeafe; color: #1e40af; padding: 10px; border-radius: 5px; border: 1px solid #93c5fd; }
-    .ats-cat-5 { background-color: #f3f4f6; color: #374151; padding: 10px; border-radius: 5px; border: 1px solid #d1d5db; }
-    .ats-title { font-weight: bold; font-size: 1.1em; display: block; border-bottom: 1px solid rgba(0,0,0,0.1); margin-bottom: 5px; padding-bottom: 3px; }
-    .ats-list { margin-left: 15px; font-size: 0.85em; }
+    
+    .hero-section p {
+        font-size: 1em;
+        margin: 8px 0;
+        opacity: 0.95;
+    }
+    
+    .feature-card {
+        background-color: #f0f4ff;
+        padding: 18px;
+        border-radius: 8px;
+        border-left: 4px solid #667eea;
+        margin: 10px 0;
+    }
+    
+    .feature-card h4 {
+        color: #667eea;
+        margin-top: 0;
+        margin-bottom: 10px;
+    }
+    
+    .user-badge {
+        background-color: #f0f4ff;
+        padding: 12px;
+        border-radius: 6px;
+        text-align: center;
+        margin: 8px 0;
+    }
+    
+    .user-badge h5 {
+        margin: 0;
+        color: #667eea;
+        font-size: 0.95em;
+    }
+    
+    .user-badge small {
+        color: #888;
+        font-size: 0.85em;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# --- KONEKSI KE GOOGLE SHEETS ---
-conn = st.connection("gsheets", type=GSheetsConnection)
+# --- HOMEPAGE ---
+st.markdown("""
+<div class='hero-section'>
+    <h1>🏥 Aplikasi Pelabelan ATS</h1>
+    <p><strong>Sistem Triase Automated Template Scoring</strong></p>
+    <p>Platform kolaboratif untuk pelabelan data Medical Records</p>
+</div>
+""", unsafe_allow_html=True)
 
-def load_data():
-    return conn.read(worksheet="Sheet1", ttl=0) 
+# --- NAVIGASI ---
+col1, col2 = st.columns(2, gap="medium")
 
-def update_data(df):
-    try:
-        conn.update(worksheet="Sheet1", data=df)
-        st.cache_data.clear()
-        return True
-    except Exception as e:
-        st.error(f"Gagal menyimpan ke Google Sheets: {e}")
-        return False
+with col1:
+    if st.button("👤 User Labeling", use_container_width=True, type="primary", help="Mulai mengisi data"):
+        st.switch_page("pages/01_👤_User_Labeling.py")
 
-def show_ats_guidance():
-    with st.expander("📘 PANDUAN TRIASE ATS (KLIK UNTUK MEMBUKA)", expanded=False):
-        cols = st.columns(5)
-        with cols[0]:
-            st.markdown("<div class='ats-cat-1'><span class='ats-title'>KAT 1: SEGERA (Red)</span><ul class='ats-list'><li>Henti Jantung/Napas</li><li>Sumbatan Jalan Napas</li><li>Kejang Terus Menerus</li><li>GCS < 9 (Koma)</li><li>Ancaman Kekerasan Segera</li></ul></div>", unsafe_allow_html=True)
-        with cols[1]:
-            st.markdown("<div class='ats-cat-2'><span class='ats-title'>KAT 2: 10 MENIT (Orange)</span><ul class='ats-list'><li>Nyeri Dada Kardiak</li><li>Sesak Berat/Stridor</li><li>Sepsis (Tak Stabil)</li><li>GCS < 13 (Bingung)</li><li>Nyeri Hebat (7-10)</li><li>Stroke Akut</li></ul></div>", unsafe_allow_html=True)
-        with cols[2]:
-            st.markdown("<div class='ats-cat-3'><span class='ats-title'>KAT 3: 30 MENIT (Green)</span><ul class='ats-list'><li>Hipertensi Berat</li><li>Sesak Sedang</li><li>Nyeri Sedang (4-6)</li><li>Sepsis (Stabil)</li><li>Cedera Tungkai Sedang</li><li>Anak Berisiko</li></ul></div>", unsafe_allow_html=True)
-        with cols[3]:
-            st.markdown("<div class='ats-cat-4'><span class='ats-title'>KAT 4: 60 MENIT (Blue)</span><ul class='ats-list'><li>Perdarahan Ringan</li><li>Cedera Kepala Ringan</li><li>Nyeri Sedang (Berisiko)</li><li>Muntah/Diare (Tanpa Dehidrasi)</li><li>Trauma Minor</li></ul></div>", unsafe_allow_html=True)
-        with cols[4]:
-            st.markdown("<div class='ats-cat-5'><span class='ats-title'>KAT 5: 120 MENIT (White)</span><ul class='ats-list'><li>Nyeri Minimal</li><li>Luka Minor (Lecet)</li><li>Ganti Perban/Kontrol</li><li>Imunisasi</li><li>Gejala Kronis</li></ul></div>", unsafe_allow_html=True)
+with col2:
+    if st.button("📊 Admin Monitoring", use_container_width=True, help="Pantau progress validator"):
+        st.switch_page("pages/02_📊_Admin_Monitoring.py")
 
-# --- LOGIN ---
-if 'username' not in st.session_state:
-    st.title("🔐 Login Tim Validator")
-    c1, c2 = st.columns([1, 2])
-    with c1:
-        user_input = st.text_input("Masukkan Nama Anda (tanpa spasi):")
-        if st.button("Masuk", type="primary"):
-            if user_input:
-                st.session_state['username'] = user_input.strip()
-                st.rerun()
-    st.stop()
+st.divider()
 
-# --- APP UTAMA ---
-username = st.session_state['username']
-st.sidebar.header(f"User: {username}")
-if st.sidebar.button("Logout"):
-    del st.session_state['username']
-    st.rerun()
+# --- INFO SECTION ---
+st.markdown("### 📋 Fitur Utama")
 
-st.title("🏥 Validator ATS Online")
-show_ats_guidance()
+col1, col2 = st.columns(2)
 
-# --- LOAD DATA ---
-try:
-    df = load_data()
-    for col in ['validator', 'instruction_ats', 'status']:
-        if col not in df.columns: df[col] = ""
-    
-    # KONVERSI DATA KE STRING
-    df['validator'] = df['validator'].astype(str).replace('nan', '')
-    df['instruction_ats'] = df['instruction_ats'].astype(str).replace('nan', '')
-    df['status'] = df['status'].astype(str).replace('nan', '')
-    
-except Exception as e:
-    st.error(f"Gagal memuat data: {e}")
-    st.stop()
+with col1:
+    st.markdown("""
+    <div class='feature-card'>
+        <h4>👤 User Labeling</h4>
+        <ul style="margin: 0; padding-left: 20px;">
+            <li>Isi instruksi_ats & output_ats</li>
+            <li>Simpan progress kapan saja</li>
+            <li>Kelola tugas dengan mudah</li>
+        </ul>
+    </div>
+    """, unsafe_allow_html=True)
 
-# --- LOGIKA BARU (PENDING vs DONE) ---
-# 1. Cari data yang belum diambil siapapun
-unassigned_mask = (df['validator'].str.strip() == "") | (df['validator'] == "nan")
+with col2:
+    st.markdown("""
+    <div class='feature-card'>
+        <h4>📊 Admin Dashboard</h4>
+        <ul style="margin: 0; padding-left: 20px;">
+            <li>Monitor progress semua user</li>
+            <li>Lihat statistik real-time</li>
+            <li>Export laporan CSV</li>
+        </ul>
+    </div>
+    """, unsafe_allow_html=True)
 
-# 2. Cari data milik user ini
-my_all_tasks = df[df['validator'] == username]
+st.divider()
 
-# 3. Cari data milik user ini yang BELUM SELESAI (Status bukan 'Done')
-my_pending_tasks = my_all_tasks[my_all_tasks['status'] != 'Done']
+st.markdown("### 👥 Validator Terauthorisasi")
 
-# Hitung Statistik
-sisa_pool = len(df[unassigned_mask])
-total_dikerjakan_saya = len(my_all_tasks)
-sisa_tugas_saya = len(my_pending_tasks)
+users = ["dr.Dhaifina", "dr.Dian", "dr.Natalia", "dr.Wulan"]
+col1, col2, col3, col4 = st.columns(4, gap="small")
 
-st.sidebar.divider()
-st.sidebar.metric("Sisa Data Global", sisa_pool)
-st.sidebar.metric("Total Tugas Saya", total_dikerjakan_saya)
-st.sidebar.metric("Sisa Tugas Aktif", sisa_tugas_saya)
+for col, user in zip([col1, col2, col3, col4], users):
+    with col:
+        st.markdown(f"""
+        <div class='user-badge'>
+            <h5>👨‍⚕️ {user}</h5>
+            <small>Validator</small>
+        </div>
+        """, unsafe_allow_html=True)
 
-# --- BAGIAN AMBIL TUGAS (LOGIKA DIPERBAIKI) ---
-# Tombol ambil tugas muncul jika TIDAK ADA tugas aktif (pending == 0).
-# Jadi walaupun total tugas saya 10, tapi kalau semuanya 'Done', form ini akan muncul lagi.
+st.divider()
 
-if sisa_tugas_saya == 0 and sisa_pool > 0:
-    if total_dikerjakan_saya > 0:
-        st.success("🎉 Hebat! Anda telah menyelesaikan semua tugas sebelumnya. Siap ambil lagi?")
-    else:
-        st.info("👋 Halo! Anda belum memiliki tugas aktif.")
-    
-    with st.form("ambil_tugas_form"):
-        st.write("Ambil paket data baru:")
-        batch_size = st.number_input("Jumlah baris:", min_value=5, max_value=50, value=10)
-        submitted = st.form_submit_button("🚀 Ambil Tugas Baru")
-        
-        if submitted:
-            current_indices = df[unassigned_mask].head(batch_size).index
-            if len(current_indices) == 0:
-                st.error("Data habis diambil orang lain!")
-            else:
-                with st.spinner("Mengambil data..."):
-                    df.loc[current_indices, 'validator'] = username
-                    if update_data(df):
-                        st.success(f"Berhasil mengambil {len(current_indices)} data baru!")
-                        time.sleep(1)
-                        st.rerun()
+st.markdown("""
+### 🚀 Quick Start
 
-# --- BAGIAN AREA KERJA (HANYA MENAMPILKAN TUGAS AKTIF) ---
-# Kita filter agar yang ditampilkan di layar kerja HANYA yang belum selesai
-# agar user fokus pada tugas barunya.
+**Untuk User:**
+1. Klik "User Labeling" → Pilih nama → Ambil tugas
+2. Isi Instruksi ATS & Output ATS sesuai input
+3. Klik "Simpan Progress" atau "Tandai Selesai"
 
-# Jika ingin melihat history (yang sudah Done), bisa dibuat toggle opsional
-show_history = st.checkbox("Tampilkan tugas yang sudah selesai (History)", value=False)
+**Untuk Admin:**
+1. Klik "Admin Monitoring" → Masukkan password
+2. Lihat dashboard progress semua user
+3. Filter dan export data sesuai kebutuhan
+""")
 
-if show_history:
-    # Tampilkan semua tugas (Active + Done)
-    working_df = my_all_tasks.copy()
-else:
-    # Tampilkan hanya tugas aktif (Pending)
-    working_df = my_pending_tasks.copy()
-
-if not working_df.empty:
-    st.subheader(f"📝 Area Kerja ({len(working_df)} data)")
-    
-    # Urutkan agar tugas yang belum selesai muncul paling atas
-    # working_df = working_df.sort_values(by='status', ascending=True) 
-
-    for index, row in working_df.iterrows():
-        with st.container():
-            # Tanda visual jika sudah selesai
-            is_done = row.get('status') == 'Done'
-            status_icon = "✅ SELESAI" if is_done else "⏳ BELUM SELESAI"
-            bg_color = "#dcfce7" if is_done else "white"
-            
-            st.markdown(f"### Data #{index + 1} - {status_icon}")
-            
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                st.markdown(f"<span class='box-header'>Instruction</span><div class='scroll-box'>{row.get('instruction', '-')}</div>", unsafe_allow_html=True)
-            with c2:
-                st.markdown(f"<span class='box-header'>Input</span><div class='scroll-box'>{row.get('input', '-')}</div>", unsafe_allow_html=True)
-            with c3:
-                st.markdown(f"<span class='box-header'>Output</span><div class='scroll-box'>{row.get('output', '-')}</div>", unsafe_allow_html=True)
-            
-            st.markdown("<span class='box-header' style='color:#b45309; margin-top:10px;'>👉 Instruction ATS</span>", unsafe_allow_html=True)
-            
-            new_val = st.text_area(
-                label="Input ATS", 
-                value=row['instruction_ats'], 
-                height=150,
-                label_visibility="collapsed", 
-                key=f"txt_{index}",
-                placeholder="Isi instruksi ATS...",
-                disabled=False # Bisa diubah true jika ingin mengunci data yang sudah Done
-            )
-            
-            col_btn, col_info = st.columns([1, 5])
-            with col_btn:
-                # Ubah teks tombol jika sudah selesai
-                btn_label = "💾 Update" if is_done else "💾 Simpan"
-                if st.button(f"{btn_label} #{index+1}", key=f"btn_{index}", type="primary"):
-                    with st.spinner("Menyimpan..."):
-                        df.at[index, 'instruction_ats'] = new_val
-                        df.at[index, 'status'] = "Done"
-                        update_data(df)
-                        st.toast("Tersimpan!", icon="✅")
-                        # Opsional: Rerun agar data hilang dari list 'Pending' jika mode history mati
-                        if not show_history: 
-                            time.sleep(0.5)
-                            st.rerun()
-            
-            st.divider()
-
-elif sisa_pool == 0 and sisa_tugas_saya == 0:
-    st.balloons()
-    st.success("🎉 Semua data global telah habis dan selesai divalidasi!")
-else:
-    # Kondisi aneh: punya tugas selesai, tapi pool habis, dll.
-    if sisa_pool == 0:
-         st.warning("Tidak ada data baru yang tersedia.")
+st.divider()
+st.caption("🔒 Aplikasi Pelabelan ATS | v1.0")
