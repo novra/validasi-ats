@@ -255,8 +255,10 @@ available_data_mask = (df['input'] != '') & (df['validator'] == '') & ((df['stat
 # Data milik user ini
 my_all_tasks = df[df['validator'] == username]
 
-# Data milik user ini yang BELUM SELESAI (Status bukan 'Done' dan tidak kosong)
-my_pending_tasks = my_all_tasks[(my_all_tasks['status'] != 'Done') & (my_all_tasks['status'] != '')]
+# Data milik user ini yang BELUM SELESAI (Status bukan 'Done')
+# Termasuk: data baru (status kosong), data sedang dikerjakan, etc
+# TIDAK termasuk: data yang sudah Done
+my_pending_tasks = my_all_tasks[my_all_tasks['status'] != 'Done']
 
 # Hitung Statistik
 sisa_pool = len(df[available_data_mask])
