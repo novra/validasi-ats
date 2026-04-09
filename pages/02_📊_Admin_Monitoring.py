@@ -17,7 +17,7 @@ def load_data():
     return conn.read(worksheet="Sheet1", ttl=0)
 
 # --- LOGIN ADMIN ---
-if 'admin_logged_in' not in st.session_state:
+if not st.session_state.get('admin_logged_in', False):
     st.title("🔐 Admin Monitoring Panel")
     st.markdown("### Silakan masukkan password admin untuk mengakses monitoring")
     
