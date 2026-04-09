@@ -45,12 +45,18 @@ st.markdown("Dashboard monitoring progress pelabelan masing-masing user")
 # --- LOAD DATA ---
 try:
     df = load_data()
-    for col in ['nama_validator', 'instruksi_ats', 'status', 'input', 'output_ats']:
+    for col in ['validator', 'instruction_ats', 'status', 'input', 'output_ats']:
         if col not in df.columns: df[col] = ""
     
+    # Rename jika kolom yang lama ada
+    if 'nama_validator' in df.columns and 'validator' not in df.columns:
+        df.rename(columns={'nama_validator': 'validator'}, inplace=True)
+    if 'instruksi_ats' in df.columns and 'instruction_ats' not in df.columns:
+        df.rename(columns={'instruksi_ats': 'instruction_ats'}, inplace=True)
+    
     # KONVERSI DATA KE STRING
-    df['nama_validator'] = df['nama_validator'].astype(str).replace('nan', '').str.strip()
-    df['instruksi_ats'] = df['instruksi_ats'].astype(str).replace('nan', '').str.strip()
+    df['validator'] = df['validator'].astype(str).replace('nan', '').str.strip()
+    df['instruction_ats'] = df['instruction_ats'].astype(str).replace('nan', '').str.strip()
     df['status'] = df['status'].astype(str).replace('nan', '').str.strip()
     df['input'] = df['input'].astype(str).replace('nan', '').str.strip()
     df['output_ats'] = df['output_ats'].astype(str).replace('nan', '').str.strip()
@@ -72,7 +78,7 @@ AUTHORIZED_USERS = [
 
 # --- KALKULASI STATISTIK ---
 def calculate_stats(df, username):
-    user_data = df[df['nama_validator'] == username]
+    user_data = df[df['validator'] == username]
     total = len(user_data)
     done = len(user_data[user_data['status'] == 'Done'])
     pending = len(user_data[(user_data['status'] != 'Done') & (user_data['status'] != '')])
@@ -92,7 +98,7 @@ total_data = len(df)
 total_done = len(df[df['status'] == 'Done'])
 total_pending = len(df[(df['status'] != 'Done') & (df['status'] != '')])
 total_available = len(df[df['status'] == ''])
-total_unassigned = len(df[df['nama_validator'] == ''])
+total_unassigned = len(df[df['validator'] == ''])
 
 # --- TAMPILKAN STATISTIK GLOBAL ---
 st.markdown("### 📈 Statistik Keseluruhan")
@@ -267,15 +273,15 @@ with col_filter2:
 with col_filter3:
     show_cols = st.multiselect(
         "Pilih Kolom yang Ditampilkan:",
-        options=['nama_validator', 'input', 'instruksi_ats', 'output_ats', 'status'],
-        default=['nama_validator', 'status', 'instruksi_ats', 'output_ats']
+        options=['validator', 'input', 'instruction_ats', 'output_ats', 'status'],
+        default=['validator', 'status', 'instruction_ats', 'output_ats']
     )
 
 # Apply filters
 filtered_df = df.copy()
 
 if "Semua" not in filter_user and filter_user:
-    filtered_df = filtered_df[filtered_df['nama_validator'].isin(filter_user)]
+    filtered_df = filtered_df[filtered_df['validator'].isin(filter_user)]
 
 if "Semua" not in filter_status and filter_status:
     status_map = {
@@ -290,11 +296,11 @@ if "Semua" not in filter_status and filter_status:
         if status == "Done":
             status_filters.append(filtered_df['status'] == "Done")
         elif status == "Belum Dimulai":
-            status_filters.append((filtered_df['nama_validator'] != '') & (filtered_df['status'] == ''))
+            status_filters.append((filtered_df['validator'] != '') & (filtered_df['status'] == ''))
         elif status == "Sedang Dikerjakan":
             status_filters.append((filtered_df['status'] != 'Done') & (filtered_df['status'] != ''))
         elif status == "Belum Diambil":
-            status_filters.append(filtered_df['nama_validator'] == '')
+            status_filters.append(filtered_df['validator'] == '')
     
     if status_filters:
         filtered_df = filtered_df[pd.concat(status_filters, axis=1).any(axis=1)]

@@ -149,19 +149,27 @@ try:
         st.info("   3. Data sudah tersedia di Sheet1")
         st.stop()
     
-    # Cek kolom yang tersedia
-    missing_cols = []
-    for col in ['nama_validator', 'instruksi_ats', 'status', 'input', 'output_ats']:
+    # Cek kolom yang tersedia (gunakan nama kolom dari Google Sheet)
+    # Priority: gunakan kolom yang sudah ada, jika tidak ada buat baru
+    if 'instruction_ats' not in df.columns and 'instruksi_ats' in df.columns:
+        df.rename(columns={'instruksi_ats': 'instruction_ats'}, inplace=True)
+    elif 'instruction_ats' not in df.columns:
+        df['instruction_ats'] = ""
+    
+    if 'validator' not in df.columns and 'nama_validator' in df.columns:
+        df.rename(columns={'nama_validator': 'validator'}, inplace=True)
+    elif 'validator' not in df.columns:
+        df['validator'] = ""
+    
+    # Pastikan kolom penting ada
+    required_cols = ['instruction_ats', 'input', 'output_ats', 'status', 'validator']
+    for col in required_cols:
         if col not in df.columns:
-            missing_cols.append(col)
             df[col] = ""
     
-    if missing_cols:
-        st.warning(f"⚠️ Kolom yang dibuat otomatis: {missing_cols}")
-    
     # KONVERSI DATA KE STRING
-    df['nama_validator'] = df['nama_validator'].astype(str).replace('nan', '').str.strip()
-    df['instruksi_ats'] = df['instruksi_ats'].astype(str).replace('nan', '').str.strip()
+    df['validator'] = df['validator'].astype(str).replace('nan', '').str.strip()
+    df['instruction_ats'] = df['instruction_ats'].astype(str).replace('nan', '').str.strip()
     df['status'] = df['status'].astype(str).replace('nan', '').str.strip()
     df['input'] = df['input'].astype(str).replace('nan', '').str.strip()
     df['output_ats'] = df['output_ats'].astype(str).replace('nan', '').str.strip()
@@ -188,13 +196,14 @@ except Exception as e:
 
 # --- LOGIKA DATA TERSEDIA (PENDING vs DONE) ---
 # Data tersedia untuk diambil jika:
-# 1. Nama validator kosong (belum diambil siapapun)
-# 2. Status kosong (belum pernah dikerjakan) ATAU status = 'Done' (sudah selesai, bisa diambil ulang)
+# 1. Kolom validator kosong (belum diambil siapapun)
+# 2. Kolom status kosong (belum pernah dikerjakan) ATAU status = 'Done' (sudah selesai, bisa diambil ulang)
+# 3. Kolom input tidak kosong (harus ada input untuk diproses)
 
-available_data_mask = (df['nama_validator'] == '') & ((df['status'] == '') | (df['status'] == 'Done'))
+available_data_mask = (df['input'] != '') & (df['validator'] == '') & ((df['status'] == '') | (df['status'] == 'Done'))
 
 # Data milik user ini
-my_all_tasks = df[df['nama_validator'] == username]
+my_all_tasks = df[df['validator'] == username]
 
 # Data milik user ini yang BELUM SELESAI (Status bukan 'Done' dan tidak kosong)
 my_pending_tasks = my_all_tasks[(my_all_tasks['status'] != 'Done') & (my_all_tasks['status'] != '')]
@@ -236,7 +245,7 @@ if sisa_tugas_saya == 0 and sisa_pool > 0:
                 st.error("❌ Data habis diambil orang lain!")
             else:
                 with st.spinner("⏳ Mengambil data..."):
-                    df.loc[available_indices, 'nama_validator'] = username
+                    df.loc[available_indices, 'validator'] = username
                     # Pastikan status kosong untuk data baru yang diambil
                     df.loc[available_indices, 'status'] = ''
                     if update_data(df):
@@ -282,20 +291,20 @@ if not working_df.empty:
                 disabled=True
             )
             
-            # ROW 2: INSTRUKSI_ATS dan OUTPUT_ATS - 2 columns
+            # ROW 2: INSTRUCTION_ATS dan OUTPUT_ATS - 2 columns
             st.markdown("<span class='box-header' style='color:#b45309; margin-top: 15px;'>✏️ ISI DATA BERIKUT:</span>", unsafe_allow_html=True)
             
             col_instr, col_output = st.columns(2, gap="medium")
             
             with col_instr:
-                st.markdown("<span class='box-header' style='color:#7c2d12;'>Instruksi ATS</span>", unsafe_allow_html=True)
+                st.markdown("<span class='box-header' style='color:#7c2d12;'>Instruction ATS</span>", unsafe_allow_html=True)
                 instruksi_val = st.text_area(
-                    label="Instruksi ATS",
-                    value=row.get('instruksi_ats', ''),
+                    label="Instruction ATS",
+                    value=row.get('instruction_ats', ''),
                     height=120,
                     label_visibility="collapsed",
                     key=f"instr_{index}",
-                    placeholder="Isi instruksi ATS di sini...",
+                    placeholder="Isi instruction ATS di sini...",
                     disabled=is_done
                 )
             
@@ -324,7 +333,7 @@ if not working_df.empty:
                     disabled=is_done
                 ):
                     with st.spinner("💫 Menyimpan progress..."):
-                        df.at[index, 'instruksi_ats'] = instruksi_val
+                        df.at[index, 'instruction_ats'] = instruksi_val
                         df.at[index, 'output_ats'] = output_val
                         if update_data(df):
                             st.toast("✅ Progress tersimpan!", icon="✅")
@@ -339,7 +348,7 @@ if not working_df.empty:
                     disabled=is_done
                 ):
                     with st.spinner("💫 Menyelesaikan data..."):
-                        df.at[index, 'instruksi_ats'] = instruksi_val
+                        df.at[index, 'instruction_ats'] = instruksi_val
                         df.at[index, 'output_ats'] = output_val
                         df.at[index, 'status'] = "Done"
                         if update_data(df):
