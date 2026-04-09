@@ -449,8 +449,10 @@ if not working_df.empty:
                     with st.spinner("💫 Menyimpan progress..."):
                         df.at[index, 'instruction_ats'] = instruksi_val
                         df.at[index, 'output_ats'] = output_val
+                        # Set status ke "Pending" untuk menandakan sedang dikerjakan
+                        df.at[index, 'status'] = "Pending"
                         if update_data(df):
-                            st.toast("✅ Progress tersimpan!", icon="✅")
+                            st.toast("✅ Progress tersimpan! Status: Sedang Dikerjakan", icon="✅")
                             time.sleep(0.3)
             
             with col_done:
