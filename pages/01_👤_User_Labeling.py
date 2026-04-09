@@ -129,10 +129,32 @@ if 'username' not in st.session_state:
 
 # --- APP UTAMA ---
 username = st.session_state['username']
-st.sidebar.header(f"User: {username}")
-if st.sidebar.button("Logout"):
-    del st.session_state['username']
-    st.rerun()
+
+# Hide automatic page navigation untuk user yang sudah login
+st.markdown("""
+<style>
+    /* Hide page navigation dari sidebar ketika user sudah login */
+    [data-testid="collapsedControl"] { display: none; }
+    [data-testid="stSidebarNav"] { display: none; }
+</style>
+""", unsafe_allow_html=True)
+
+st.sidebar.header(f"👤 User: {username}")
+st.sidebar.divider()
+
+# Tombol navigasi custom
+col1, col2 = st.sidebar.columns(2)
+with col1:
+    if st.sidebar.button("🏠 Kembali", use_container_width=True, help="Kembali ke halaman utama"):
+        del st.session_state['username']
+        st.switch_page("app.py")
+
+with col2:
+    if st.sidebar.button("🚪 Logout", use_container_width=True):
+        del st.session_state['username']
+        st.rerun()
+
+st.sidebar.divider()
 
 st.title("🏥 Validator ATS Online")
 show_ats_guidance()
