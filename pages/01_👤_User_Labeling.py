@@ -49,6 +49,59 @@ st.markdown("""
         color: #6b7280 !important;
         cursor: not-allowed !important;
     }
+    
+    /* Styling khusus untuk INPUT reference box */
+    .input-reference-box {
+        background: linear-gradient(135deg, #fef3f2 0%, #fef9f7 100%);
+        border: 3px solid #f4a261;
+        border-radius: 10px;
+        padding: 18px;
+        margin-bottom: 25px;
+        color: #2d2d2d;
+        font-size: 16px;
+        line-height: 1.8;
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        word-wrap: break-word;
+        white-space: pre-wrap;
+        box-shadow: 0 2px 8px rgba(244, 162, 97, 0.15);
+    }
+    
+    .input-reference-header {
+        font-weight: 700;
+        color: #e76f51;
+        font-size: 14px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin-bottom: 12px;
+        padding-bottom: 8px;
+        border-bottom: 2px solid #e76f51;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+    
+    /* Meningkatkan visibility textarea untuk instruction dan output */
+    .work-textarea .stTextArea > div > div > textarea {
+        background-color: #ffffff !important;
+        border: 2px solid #cbd5e1 !important;
+        border-radius: 8px !important;
+        font-size: 15px !important;
+        padding: 14px !important;
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif !important;
+        line-height: 1.7 !important;
+        color: #1f2937 !important;
+    }
+    
+    .work-textarea .stTextArea > div > div > textarea:focus {
+        border-color: #0ea5e9 !important;
+        box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.2) !important;
+    }
+    
+    .work-textarea .stTextArea > div > div > textarea:disabled {
+        background-color: #f1f5f9 !important;
+        color: #64748b !important;
+        border-color: #cbd5e1 !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -333,42 +386,51 @@ if not working_df.empty:
             """, unsafe_allow_html=True)
             
             # ROW 1: INPUT (Read-only, Referensi) - Full Width
-            st.markdown("<span class='box-header' style='color:#374151;'>📖 INPUT (Referensi - Jangan Diubah)</span>", unsafe_allow_html=True)
-            st.text_area(
-                label="Input Reference", 
-                value=row.get('input', ''),
-                height=100,
-                label_visibility="collapsed", 
-                key=f"input_{index}",
-                disabled=True
-            )
+            # Tampilkan sebagai custom box (bukan textarea) untuk clarity maksimal
+            input_text = row.get('input', '')
+            st.markdown(f"""
+            <div class='input-reference-box'>
+                <div class='input-reference-header'>📖 INPUT / REFERENSI PASIEN</div>
+                <div style="white-space: pre-wrap; font-size: 16px; line-height: 1.9; color: #2d2d2d;">
+                    {input_text}
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
             
             # ROW 2: INSTRUCTION_ATS dan OUTPUT_ATS - 2 columns
-            st.markdown("<span class='box-header' style='color:#b45309; margin-top: 15px;'>✏️ ISI DATA BERIKUT:</span>", unsafe_allow_html=True)
+            st.markdown("<span class='box-header' style='color:#0369a1; margin-top: 15px; margin-bottom: 15px; font-size: 14px;'>✏️ ISI DATA BERIKUT (KOLOM WAJIB DIISI):</span>", unsafe_allow_html=True)
             
             col_instr, col_output = st.columns(2, gap="medium")
             
             with col_instr:
-                st.markdown("<span class='box-header' style='color:#7c2d12;'>Instruction ATS</span>", unsafe_allow_html=True)
+                st.markdown("""
+                <div style='background-color: #f0f9ff; padding: 10px; border-radius: 6px; border-left: 4px solid #0284c7; margin-bottom: 10px;'>
+                    <span style='font-weight: 700; color: #0369a1; font-size: 13px;'>✍️ INSTRUCTION ATS</span>
+                </div>
+                """, unsafe_allow_html=True)
                 instruksi_val = st.text_area(
                     label="Instruction ATS",
                     value=row.get('instruction_ats', ''),
-                    height=120,
+                    height=140,
                     label_visibility="collapsed",
                     key=f"instr_{index}",
-                    placeholder="Isi instruction ATS di sini...",
+                    placeholder="Isi klasifikasi ATS berdasarkan instruksi...",
                     disabled=is_done
                 )
             
             with col_output:
-                st.markdown("<span class='box-header' style='color:#7c2d12;'>Output ATS</span>", unsafe_allow_html=True)
+                st.markdown("""
+                <div style='background-color: #f0fce7; padding: 10px; border-radius: 6px; border-left: 4px solid #22c55e; margin-bottom: 10px;'>
+                    <span style='font-weight: 700; color: #166534; font-size: 13px;'>✍️ OUTPUT ATS</span>
+                </div>
+                """, unsafe_allow_html=True)
                 output_val = st.text_area(
                     label="Output ATS",
                     value=row.get('output_ats', ''),
-                    height=120,
+                    height=140,
                     label_visibility="collapsed",
                     key=f"output_{index}",
-                    placeholder="Isi output ATS di sini...",
+                    placeholder="Isi hasil triase/output ATS...",
                     disabled=is_done
                 )
             
