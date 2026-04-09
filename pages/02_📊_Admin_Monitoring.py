@@ -26,7 +26,7 @@ if 'admin_logged_in' not in st.session_state:
         admin_pass = st.text_input("Password Admin:", type="password", placeholder="Masukkan password...")
         
         if st.button("🔓 Akses Admin", type="primary", use_container_width=True):
-            if admin_pass == "admin123":  # Ganti dengan password yang lebih aman
+            if admin_pass == "TriaseBRIN2026":
                 st.session_state['admin_logged_in'] = True
                 st.rerun()
             else:
