@@ -106,8 +106,26 @@ streamlit run app.py
 
 **❌ "Area Kerja 0 data"**
 - Login dengan salah satu user: dr.Dhaifina, dr.Dian, dr.Natalia, dr.Wulan
+- Pastikan password user yang dimasukkan sesuai dan terdiri dari 6 karakter
 - Klik "Ambil Tugas Baru" untuk mengambil data dari pool
 - Jika "Sisa Data Tersedia" = 0, berarti tidak ada data di Google Sheet yang memiliki kolom `input` kosong dan `nama_validator` kosong
+
+---
+
+## 5️⃣ Admin Monitoring Access
+
+## 4️⃣ Daftar Password Validator
+
+Password tiap validator sekarang unik dan terdiri dari 6 karakter:
+
+| Validator | Password |
+|-----------|----------|
+| `dr.Dhaifina` | `DH261A` |
+| `dr.Dian` | `DN482B` |
+| `dr.Natalia` | `NT593C` |
+| `dr.Wulan` | `WL704D` |
+
+Jika ingin mengganti password, ubah file `auth_config.py`.
 
 ---
 

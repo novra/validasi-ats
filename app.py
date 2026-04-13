@@ -1,4 +1,5 @@
 import streamlit as st
+from auth_config import AUTHORIZED_USERS
 
 # --- KONFIGURASI HALAMAN ---
 st.set_page_config(
@@ -121,10 +122,9 @@ st.divider()
 
 st.markdown("### 👥 Validator Terauthorisasi")
 
-users = ["dr.Dhaifina", "dr.Dian", "dr.Natalia", "dr.Wulan"]
 col1, col2, col3, col4 = st.columns(4, gap="small")
 
-for col, user in zip([col1, col2, col3, col4], users):
+for col, user in zip([col1, col2, col3, col4], AUTHORIZED_USERS):
     with col:
         st.markdown(f"""
         <div class='user-badge'>
@@ -139,7 +139,7 @@ st.markdown("""
 ### 🚀 Quick Start
 
 **Untuk User:**
-1. Klik "User Labeling" → Pilih nama → Ambil tugas
+1. Klik "User Labeling" → Pilih nama + masukkan password 6 karakter → Ambil tugas
 2. Isi Instruksi ATS & Output ATS sesuai input
 3. Klik "Simpan Progress" atau "Tandai Selesai"
 

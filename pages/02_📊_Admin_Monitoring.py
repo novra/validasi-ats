@@ -3,6 +3,7 @@ import pandas as pd
 from streamlit_gsheets import GSheetsConnection
 import plotly.graph_objects as go
 import plotly.express as px
+from auth_config import AUTHORIZED_USERS
 
 # --- KONFIGURASI HALAMAN ---
 st.set_page_config(layout="wide", page_title="Admin Monitoring Pelabelan")
@@ -89,14 +90,6 @@ try:
 except Exception as e:
     st.error(f"Gagal memuat data: {e}")
     st.stop()
-
-# --- DAFTAR USER ---
-AUTHORIZED_USERS = [
-    "dr.Dhaifina",
-    "dr.Dian",
-    "dr.Natalia",
-    "dr.Wulan"
-]
 
 # --- KALKULASI STATISTIK ---
 def calculate_stats(df, username):

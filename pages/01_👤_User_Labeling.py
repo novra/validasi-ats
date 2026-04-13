@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from streamlit_gsheets import GSheetsConnection
 import time
+from auth_config import AUTHORIZED_USERS, USER_CREDENTIALS
 
 # --- KONFIGURASI HALAMAN ---
 st.set_page_config(layout="wide", page_title="Online ATS Validator")
@@ -142,17 +143,9 @@ def show_ats_guidance():
         with cols[4]:
             st.markdown("<div class='ats-cat-5'><span class='ats-title'>KAT 5: 120 MENIT (White)</span><ul class='ats-list'><li>Nyeri Minimal</li><li>Luka Minor (Lecet)</li><li>Ganti Perban/Kontrol</li><li>Imunisasi</li><li>Gejala Kronis</li></ul></div>", unsafe_allow_html=True)
 
-# --- LOGIN ---
-AUTHORIZED_USERS = [
-    "dr.Dhaifina",
-    "dr.Dian",
-    "dr.Natalia",
-    "dr.Wulan"
-]
-
 if 'username' not in st.session_state:
     st.title("🔐 Login Tim Validator")
-    st.markdown("### Silakan pilih nama Anda untuk mulai bekerja")
+    st.markdown("### Silakan pilih nama dan masukkan password Anda untuk mulai bekerja")
     
     col1, col2 = st.columns([1, 2])
     with col1:
@@ -162,13 +155,24 @@ if 'username' not in st.session_state:
             index=None,
             placeholder="Pilih nama Anda..."
         )
+        user_password = st.text_input(
+            "Password:",
+            type="password",
+            placeholder="Masukkan password 6 karakter"
+        )
         
         if st.button("🔓 Masuk", type="primary", use_container_width=True):
-            if selected_user:
+            if not selected_user:
+                st.error("Silakan pilih nama terlebih dahulu!")
+            elif not user_password:
+                st.error("Silakan masukkan password Anda!")
+            elif len(user_password) != 6:
+                st.error("Password harus terdiri dari 6 karakter!")
+            elif USER_CREDENTIALS.get(selected_user) == user_password:
                 st.session_state['username'] = selected_user
                 st.rerun()
             else:
-                st.error("Silakan pilih nama terlebih dahulu!")
+                st.error("Nama atau password tidak sesuai!")
     
     with col2:
         st.info("""
@@ -177,6 +181,8 @@ if 'username' not in st.session_state:
         - dr.Dian
         - dr.Natalia
         - dr.Wulan
+
+        Gunakan password unik 6 karakter sesuai akun masing-masing.
         """)
     st.stop()
 
