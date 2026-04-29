@@ -17,6 +17,14 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 def load_data():
     return conn.read(worksheet="Sheet1", ttl=0)
 
+def update_data(df):
+    try:
+        conn.update(worksheet="Sheet1", data=df)
+        return True
+    except Exception as e:
+        st.error(f"Gagal update Google Sheet: {e}")
+        return False
+
 # --- LOGIN ADMIN ---
 if not st.session_state.get('admin_logged_in', False):
     st.title("🔐 Admin Monitoring Panel")
@@ -332,6 +340,74 @@ if show_cols:
     )
     
     st.info(f"Total: {len(filtered_df)} data")
+
+# --- REPLACE INPUT BERDASARKAN OUTPUT BERMASALAH ---
+st.divider()
+st.markdown("### Replace Input Berdasarkan Output Bermasalah")
+
+problem_keywords = ["serupa", "terlalu banyak"]
+problem_pattern = "|".join(problem_keywords)
+problem_mask = df['output_ats'].str.contains(problem_pattern, case=False, na=False)
+problem_df = df[problem_mask].copy()
+
+st.caption("Filter otomatis mencari data dengan output_ats yang mengandung kata: serupa atau terlalu banyak.")
+st.metric("Data terfilter", len(problem_df))
+
+if problem_df.empty:
+    st.info("Tidak ada data dengan output_ats yang mengandung kata 'serupa' atau 'terlalu banyak'.")
+else:
+    preview_cols = ['validator', 'status', 'input', 'output_ats']
+    preview_df = problem_df[preview_cols].copy()
+    preview_df.insert(0, 'row_sheet', preview_df.index + 1)
+
+    st.dataframe(
+        preview_df,
+        use_container_width=True,
+        height=300
+    )
+
+    row_options = {
+        f"Row {index + 1} - {str(row.get('output_ats', ''))[:80]}": index
+        for index, row in problem_df.iterrows()
+    }
+
+    selected_rows = st.multiselect(
+        "Pilih baris yang input-nya akan diganti:",
+        options=list(row_options.keys())
+    )
+
+    replacement_input = st.text_area(
+        "Data input baru:",
+        height=180,
+        placeholder="Tempel data input baru di sini..."
+    )
+
+    reset_progress = st.checkbox(
+        "Kosongkan instruction_ats, output_ats, status, dan validator setelah input diganti",
+        value=False,
+        help="Aktifkan jika data baru perlu masuk lagi ke pool dan dikerjakan ulang dari awal."
+    )
+
+    confirm_replace = st.checkbox("Saya yakin ingin mengganti input untuk baris yang dipilih.")
+
+    if st.button("Replace Input Terpilih", type="primary", use_container_width=True):
+        selected_indices = [row_options[label] for label in selected_rows]
+
+        if not selected_indices:
+            st.error("Pilih minimal satu baris terlebih dahulu.")
+        elif not replacement_input.strip():
+            st.error("Isi data input baru terlebih dahulu.")
+        elif not confirm_replace:
+            st.error("Centang konfirmasi sebelum melakukan replace.")
+        else:
+            df.loc[selected_indices, 'input'] = replacement_input.strip()
+
+            if reset_progress:
+                df.loc[selected_indices, ['instruction_ats', 'output_ats', 'status', 'validator']] = ''
+
+            if update_data(df):
+                st.success(f"Berhasil mengganti input untuk {len(selected_indices)} baris.")
+                st.rerun()
 
 # --- STATISTIK DOWNLOAD ---
 st.markdown("### 📥 Export Data")

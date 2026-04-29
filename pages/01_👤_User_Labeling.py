@@ -129,6 +129,32 @@ def update_data(df):
         st.error(f"Gagal menyimpan ke Google Sheets: {e}")
         return False
 
+def auto_save_progress(df, index):
+    if index not in df.index:
+        return
+
+    if df.at[index, 'status'] == "Done":
+        return
+
+    instr_key = f"instr_{index}"
+    output_key = f"output_{index}"
+    current_instr = st.session_state.get(instr_key, "")
+    current_output = st.session_state.get(output_key, "")
+
+    if (
+        df.at[index, 'instruction_ats'] == current_instr
+        and df.at[index, 'output_ats'] == current_output
+        and df.at[index, 'status'] == "Pending"
+    ):
+        return
+
+    df.at[index, 'instruction_ats'] = current_instr
+    df.at[index, 'output_ats'] = current_output
+    df.at[index, 'status'] = "Pending"
+
+    if update_data(df):
+        st.toast("Progress tersimpan otomatis.", icon="✅")
+
 def show_ats_guidance():
     with st.expander("📘 PANDUAN TRIASE ATS (KLIK UNTUK MEMBUKA)", expanded=False):
         cols = st.columns(5)
@@ -421,7 +447,9 @@ if not working_df.empty:
                     label_visibility="collapsed",
                     key=f"instr_{index}",
                     placeholder="Isi klasifikasi ATS berdasarkan instruksi...",
-                    disabled=is_done
+                    disabled=is_done,
+                    on_change=auto_save_progress,
+                    args=(df, index)
                 )
             
             with col_output:
@@ -437,7 +465,9 @@ if not working_df.empty:
                     label_visibility="collapsed",
                     key=f"output_{index}",
                     placeholder="Isi hasil triase/output ATS...",
-                    disabled=is_done
+                    disabled=is_done,
+                    on_change=auto_save_progress,
+                    args=(df, index)
                 )
             
             # ROW 3: BUTTONS
