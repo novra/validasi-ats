@@ -109,18 +109,40 @@ st.markdown("""
 # --- KONEKSI KE GOOGLE SHEETS ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 
+SHEET_COLUMNS = ['instruction_ats', 'input', 'output_ats', 'validator', 'status']
+
 @st.cache_data(ttl=0)
 def load_data():
-    try:
-        df = conn.read(worksheet="Sheet1", ttl=0)
-        return df
-    except Exception as e:
-        st.error(f"❌ Error membaca Google Sheet: {e}")
-        return None
+    last_error = None
+    for _ in range(3):
+        try:
+            df = conn.read(worksheet="Sheet1", ttl=0)
+            if df is not None and not df.empty:
+                return df
+        except Exception as e:
+            last_error = e
+        time.sleep(0.5)
+
+    if last_error:
+        st.error(f"Error membaca Google Sheet: {last_error}")
+    return df if 'df' in locals() else None
+
+def prepare_sheet_data(df):
+    sheet_df = df.copy()
+
+    for col in SHEET_COLUMNS:
+        if col not in sheet_df.columns:
+            sheet_df[col] = ''
+
+    legacy_cols = ['instruksi_ats', 'nama_validator']
+    sheet_df = sheet_df.drop(columns=[col for col in legacy_cols if col in sheet_df.columns])
+
+    ordered_cols = SHEET_COLUMNS + [col for col in sheet_df.columns if col not in SHEET_COLUMNS]
+    return sheet_df[ordered_cols]
 
 def update_data(df):
     try:
-        conn.update(worksheet="Sheet1", data=df)
+        conn.update(worksheet="Sheet1", data=prepare_sheet_data(df))
         # Clear cache untuk force reload data
         load_data.clear()
         st.cache_data.clear()
@@ -252,7 +274,7 @@ try:
         st.error("❌ Data dari Google Sheet kosong atau tidak dapat diakses!")
         st.info("💡 Pastikan:")
         st.info("   1. Google Sheet sudah dikonfigurasi di Streamlit secrets")
-        st.info("   2. Sheet memiliki kolom: input, nama_validator, status, instruksi_ats, output_ats")
+        st.info("   2. Sheet memiliki kolom: instruction_ats, input, output_ats, validator, status")
         st.info("   3. Data sudah tersedia di Sheet1")
         st.stop()
     

@@ -14,12 +14,27 @@ AUTHORIZED_ADMINS = ["admin"]
 # --- KONEKSI KE GOOGLE SHEETS ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 
+SHEET_COLUMNS = ['instruction_ats', 'input', 'output_ats', 'validator', 'status']
+
 def load_data():
     return conn.read(worksheet="Sheet1", ttl=0)
 
+def prepare_sheet_data(df):
+    sheet_df = df.copy()
+
+    for col in SHEET_COLUMNS:
+        if col not in sheet_df.columns:
+            sheet_df[col] = ''
+
+    legacy_cols = ['instruksi_ats', 'nama_validator']
+    sheet_df = sheet_df.drop(columns=[col for col in legacy_cols if col in sheet_df.columns])
+
+    ordered_cols = SHEET_COLUMNS + [col for col in sheet_df.columns if col not in SHEET_COLUMNS]
+    return sheet_df[ordered_cols]
+
 def update_data(df):
     try:
-        conn.update(worksheet="Sheet1", data=df)
+        conn.update(worksheet="Sheet1", data=prepare_sheet_data(df))
         return True
     except Exception as e:
         st.error(f"Gagal update Google Sheet: {e}")
@@ -72,14 +87,15 @@ st.markdown("Dashboard monitoring progress pelabelan masing-masing user")
 # --- LOAD DATA ---
 try:
     df = load_data()
-    for col in ['validator', 'instruction_ats', 'status', 'input', 'output_ats']:
-        if col not in df.columns: df[col] = ""
-    
+
     # Rename jika kolom yang lama ada
     if 'nama_validator' in df.columns and 'validator' not in df.columns:
         df.rename(columns={'nama_validator': 'validator'}, inplace=True)
     if 'instruksi_ats' in df.columns and 'instruction_ats' not in df.columns:
         df.rename(columns={'instruksi_ats': 'instruction_ats'}, inplace=True)
+
+    for col in ['validator', 'instruction_ats', 'status', 'input', 'output_ats']:
+        if col not in df.columns: df[col] = ""
     
     # KONVERSI DATA KE STRING - LEBIH ROBUST
     # Handle NaN, None, dan nilai null lainnya
