@@ -382,12 +382,6 @@ else:
         placeholder="Tempel data input baru di sini..."
     )
 
-    reset_progress = st.checkbox(
-        "Kosongkan instruction_ats, output_ats, status, dan validator setelah input diganti",
-        value=False,
-        help="Aktifkan jika data baru perlu masuk lagi ke pool dan dikerjakan ulang dari awal."
-    )
-
     confirm_replace = st.checkbox("Saya yakin ingin mengganti input untuk baris yang dipilih.")
 
     if st.button("Replace Input Terpilih", type="primary", use_container_width=True):
@@ -401,9 +395,8 @@ else:
             st.error("Centang konfirmasi sebelum melakukan replace.")
         else:
             df.loc[selected_indices, 'input'] = replacement_input.strip()
-
-            if reset_progress:
-                df.loc[selected_indices, ['instruction_ats', 'output_ats', 'status', 'validator']] = ''
+            df.loc[selected_indices, ['instruction_ats', 'output_ats']] = ''
+            df.loc[selected_indices, 'status'] = 'Pending'
 
             if update_data(df):
                 st.success(f"Berhasil mengganti input untuk {len(selected_indices)} baris.")
