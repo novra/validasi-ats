@@ -121,7 +121,7 @@ def calculate_stats(df, username):
     total = len(user_data)
     done = len(user_data[user_data['status'] == 'Done'])
     pending = len(user_data[(user_data['status'] != 'Done') & (user_data['status'] != '')])
-    available = len(user_data[user_data['status'] == ''])  # Diambil tapi belum dimulai
+    available = len(user_data[(user_data['validator'] != '') & (user_data['status'] == '')])  # Diambil tapi belum dimulai
     
     return {
         'username': username,
@@ -135,9 +135,9 @@ def calculate_stats(df, username):
 # --- HITUNG STATISTIK GLOBAL ---
 total_data = len(df)
 total_done = len(df[df['status'] == 'Done'])
-total_pending = len(df[(df['status'] != 'Done') & (df['status'] != '')])
-total_available = len(df[df['status'] == ''])
-total_unassigned = len(df[df['validator'] == ''])
+total_pending = len(df[(df['validator'] != '') & (df['status'] != 'Done') & (df['status'] != '')])
+total_available = len(df[(df['validator'] != '') & (df['status'] == '')])
+total_unassigned = len(df[(df['validator'] == '') & (df['status'] == '')])
 
 # --- TAMPILKAN STATISTIK GLOBAL ---
 st.markdown("### 📈 Statistik Keseluruhan")

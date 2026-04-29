@@ -172,6 +172,7 @@ def auto_save_progress(df, index):
 
     df.at[index, 'instruction_ats'] = current_instr
     df.at[index, 'output_ats'] = current_output
+    df.at[index, 'validator'] = username
     df.at[index, 'status'] = "Pending"
 
     if update_data(df):
@@ -335,7 +336,7 @@ try:
         st.sidebar.write(f"✓ Data dengan status 'Done': {data_with_done_status}")
         st.sidebar.write(f"✓ Data dengan status kosong/Done: {data_with_empty_or_done}")
         
-        available_count = len(df[(df['input'] != '') & (df['validator'] == '') & ((df['status'] == '') | (df['status'] == 'Done'))])
+        available_count = len(df[(df['input'] != '') & (df['validator'] == '') & (df['status'] == '')])
         st.sidebar.write(f"🎯 **DATA TERSEDIA (kombinasi ketiga kondisi): {available_count}**")
         
         st.sidebar.divider()
@@ -354,10 +355,10 @@ except Exception as e:
 # --- LOGIKA DATA TERSEDIA (PENDING vs DONE) ---
 # Data tersedia untuk diambil jika:
 # 1. Kolom validator kosong (belum diambil siapapun)
-# 2. Kolom status kosong (belum pernah dikerjakan) ATAU status = 'Done' (sudah selesai, bisa diambil ulang)
+# 2. Kolom status kosong (belum pernah dikerjakan)
 # 3. Kolom input tidak kosong (harus ada input untuk diproses)
 
-available_data_mask = (df['input'] != '') & (df['validator'] == '') & ((df['status'] == '') | (df['status'] == 'Done'))
+available_data_mask = (df['input'] != '') & (df['validator'] == '') & (df['status'] == '')
 
 # Data milik user ini
 my_all_tasks = df[df['validator'] == username]
@@ -366,15 +367,18 @@ my_all_tasks = df[df['validator'] == username]
 # Termasuk: data baru (status kosong), data sedang dikerjakan, etc
 # TIDAK termasuk: data yang sudah Done
 my_pending_tasks = my_all_tasks[my_all_tasks['status'] != 'Done']
+my_done_tasks = my_all_tasks[my_all_tasks['status'] == 'Done']
 
 # Hitung Statistik
 sisa_pool = len(df[available_data_mask])
 total_dikerjakan_saya = len(my_all_tasks)
 sisa_tugas_saya = len(my_pending_tasks)
+selesai_saya = len(my_done_tasks)
 
 st.sidebar.divider()
 st.sidebar.metric("📊 Sisa Data Tersedia", sisa_pool)
 st.sidebar.metric("📋 Total Tugas Saya", total_dikerjakan_saya)
+st.sidebar.metric("✅ Selesai Saya", selesai_saya)
 st.sidebar.metric("⏳ Tugas Aktif Saya", sisa_tugas_saya)
 
 # --- BAGIAN AMBIL TUGAS ---
@@ -507,6 +511,7 @@ if not working_df.empty:
                     with st.spinner("💫 Menyimpan progress..."):
                         df.at[index, 'instruction_ats'] = instruksi_val
                         df.at[index, 'output_ats'] = output_val
+                        df.at[index, 'validator'] = username
                         # Set status ke "Pending" untuk menandakan sedang dikerjakan
                         df.at[index, 'status'] = "Pending"
                         if update_data(df):
@@ -524,6 +529,7 @@ if not working_df.empty:
                     with st.spinner("💫 Menyelesaikan data..."):
                         df.at[index, 'instruction_ats'] = instruksi_val
                         df.at[index, 'output_ats'] = output_val
+                        df.at[index, 'validator'] = username
                         df.at[index, 'status'] = "Done"
                         if update_data(df):
                             st.toast("✅ Data selesai! Status diubah ke Done.", icon="✅")
