@@ -15,6 +15,7 @@ AUTHORIZED_ADMINS = ["admin"]
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 SHEET_COLUMNS = ['instruction_ats', 'input', 'output_ats', 'validator', 'status']
+MIN_NONEMPTY_INPUT_ROWS = 1
 
 def load_data():
     return conn.read(worksheet="Sheet1", ttl=0)
@@ -32,9 +33,64 @@ def prepare_sheet_data(df):
     ordered_cols = SHEET_COLUMNS + [col for col in sheet_df.columns if col not in SHEET_COLUMNS]
     return sheet_df[ordered_cols]
 
-def update_data(df):
+def merge_with_latest_sheet(df, changed_indices, changed_columns):
+    latest_df = conn.read(worksheet="Sheet1", ttl=0)
+    if latest_df is None or latest_df.empty:
+        raise ValueError("Google Sheet terbaru kosong atau tidak dapat dibaca.")
+
+    latest_data = prepare_sheet_data(latest_df)
+    pending_data = prepare_sheet_data(df)
+
+    if len(latest_data) < len(pending_data):
+        raise ValueError(
+            f"Jumlah baris Google Sheet terbaru ({len(latest_data)}) lebih sedikit dari data lokal ({len(pending_data)})."
+        )
+
+    if len(latest_data) > len(pending_data):
+        for col in pending_data.columns:
+            if col not in latest_data.columns:
+                latest_data[col] = ''
+
+    for index in changed_indices:
+        if index not in pending_data.index or index not in latest_data.index:
+            raise ValueError(f"Baris {index + 1} tidak ditemukan saat sinkronisasi.")
+
+        for col in changed_columns:
+            if col not in pending_data.columns:
+                raise ValueError(f"Kolom {col} tidak ditemukan saat sinkronisasi.")
+            if col not in latest_data.columns:
+                latest_data[col] = ''
+            latest_data.at[index, col] = pending_data.at[index, col]
+
+    return latest_data
+
+def update_data(df, changed_indices=None, changed_columns=None):
     try:
-        conn.update(worksheet="Sheet1", data=prepare_sheet_data(df))
+        expected_rows = st.session_state.get('admin_loaded_sheet_rows')
+        if df is None or df.empty:
+            st.error("Update dibatalkan: data yang akan ditulis kosong.")
+            return False
+
+        if changed_indices is None or changed_columns is None:
+            st.error("Update dibatalkan: perubahan baris/kolom tidak diketahui.")
+            return False
+
+        sheet_data = merge_with_latest_sheet(df, changed_indices, changed_columns)
+        nonempty_input_rows = sheet_data['input'].fillna('').astype(str).str.strip().ne('').sum()
+
+        if nonempty_input_rows < MIN_NONEMPTY_INPUT_ROWS:
+            st.error("Update dibatalkan: kolom input terbaca kosong. Muat ulang data sebelum mencoba lagi.")
+            return False
+
+        if expected_rows is not None and len(sheet_data) < expected_rows:
+            st.error(
+                f"Update dibatalkan: jumlah baris turun dari {expected_rows} ke {len(sheet_data)}. "
+                "Ini mencegah Google Sheet tertimpa oleh data hasil filter."
+            )
+            return False
+
+        conn.update(worksheet="Sheet1", data=sheet_data)
+        st.session_state['admin_loaded_sheet_rows'] = len(sheet_data)
         return True
     except Exception as e:
         st.error(f"Gagal update Google Sheet: {e}")
@@ -87,6 +143,11 @@ st.markdown("Dashboard monitoring progress pelabelan masing-masing user")
 # --- LOAD DATA ---
 try:
     df = load_data()
+    if df is None or df.empty:
+        st.error("Google Sheet kosong atau tidak dapat diakses.")
+        st.stop()
+
+    st.session_state['admin_loaded_sheet_rows'] = len(df)
 
     # Rename jika kolom yang lama ada
     if 'nama_validator' in df.columns and 'validator' not in df.columns:
@@ -108,8 +169,7 @@ try:
         # Final strip setelah semua cleaning
         df[col] = df[col].str.strip()
     
-    # Filter hanya data yang memiliki input (tidak kosong)
-    df = df[df['input'] != '']
+    has_input_mask = df['input'] != ''
     
 except Exception as e:
     st.error(f"Gagal memuat data: {e}")
@@ -133,11 +193,13 @@ def calculate_stats(df, username):
     }
 
 # --- HITUNG STATISTIK GLOBAL ---
-total_data = len(df)
-total_done = len(df[df['status'] == 'Done'])
-total_pending = len(df[(df['validator'] != '') & (df['status'] != 'Done') & (df['status'] != '')])
-total_available = len(df[(df['validator'] != '') & (df['status'] == '')])
-total_unassigned = len(df[(df['validator'] == '') & (df['status'] == '')])
+visible_df = df[has_input_mask].copy()
+
+total_data = len(visible_df)
+total_done = len(visible_df[visible_df['status'] == 'Done'])
+total_pending = len(visible_df[(visible_df['validator'] != '') & (visible_df['status'] != 'Done') & (visible_df['status'] != '')])
+total_available = len(visible_df[(visible_df['validator'] != '') & (visible_df['status'] == '')])
+total_unassigned = len(visible_df[(visible_df['validator'] == '') & (visible_df['status'] == '')])
 
 # --- TAMPILKAN STATISTIK GLOBAL ---
 st.markdown("### 📈 Statistik Keseluruhan")
@@ -161,7 +223,7 @@ st.markdown("### 👥 Progress Masing-Masing User")
 
 user_stats = []
 for user in AUTHORIZED_USERS:
-    stats = calculate_stats(df, user)
+    stats = calculate_stats(visible_df, user)
     user_stats.append(stats)
 
 # Buat dataframe untuk ditampilkan
@@ -317,7 +379,7 @@ with col_filter3:
     )
 
 # Apply filters
-filtered_df = df.copy()
+filtered_df = visible_df.copy()
 
 if "Semua" not in filter_user and filter_user:
     filtered_df = filtered_df[filtered_df['validator'].isin(filter_user)]
@@ -363,7 +425,7 @@ st.markdown("### Replace Input Berdasarkan Output Bermasalah")
 
 problem_keywords = ["serupa", "terlalu banyak"]
 problem_pattern = "|".join(problem_keywords)
-problem_mask = df['output_ats'].str.contains(problem_pattern, case=False, na=False)
+problem_mask = has_input_mask & df['output_ats'].str.contains(problem_pattern, case=False, na=False)
 problem_df = df[problem_mask].copy()
 
 st.caption("Filter otomatis mencari data dengan output_ats yang mengandung kata: serupa atau terlalu banyak.")
@@ -414,7 +476,7 @@ else:
             df.loc[selected_indices, ['instruction_ats', 'output_ats']] = ''
             df.loc[selected_indices, 'status'] = 'Pending'
 
-            if update_data(df):
+            if update_data(df, selected_indices, ['input', 'instruction_ats', 'output_ats', 'status']):
                 st.success(f"Berhasil mengganti input untuk {len(selected_indices)} baris.")
                 st.rerun()
 

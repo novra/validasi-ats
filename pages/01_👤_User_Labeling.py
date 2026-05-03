@@ -110,6 +110,7 @@ st.markdown("""
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 SHEET_COLUMNS = ['instruction_ats', 'input', 'output_ats', 'validator', 'status']
+MIN_NONEMPTY_INPUT_ROWS = 1
 
 @st.cache_data(ttl=0)
 def load_data():
@@ -140,9 +141,77 @@ def prepare_sheet_data(df):
     ordered_cols = SHEET_COLUMNS + [col for col in sheet_df.columns if col not in SHEET_COLUMNS]
     return sheet_df[ordered_cols]
 
-def update_data(df):
+def merge_with_latest_sheet(df, changed_indices, changed_columns, expected_values=None):
+    latest_df = conn.read(worksheet="Sheet1", ttl=0)
+    if latest_df is None or latest_df.empty:
+        raise ValueError("Google Sheet terbaru kosong atau tidak dapat dibaca.")
+
+    latest_data = prepare_sheet_data(latest_df)
+    pending_data = prepare_sheet_data(df)
+
+    if len(latest_data) < len(pending_data):
+        raise ValueError(
+            f"Jumlah baris Google Sheet terbaru ({len(latest_data)}) lebih sedikit dari data lokal ({len(pending_data)})."
+        )
+
+    if len(latest_data) > len(pending_data):
+        for col in pending_data.columns:
+            if col not in latest_data.columns:
+                latest_data[col] = ''
+
+    for index in changed_indices:
+        if index not in pending_data.index or index not in latest_data.index:
+            raise ValueError(f"Baris {index + 1} tidak ditemukan saat sinkronisasi.")
+
+        if expected_values:
+            for col, allowed_values in expected_values.items():
+                if col not in latest_data.columns:
+                    latest_data[col] = ''
+                if not isinstance(allowed_values, (list, tuple, set)):
+                    allowed_values = [allowed_values]
+                latest_value = str(latest_data.at[index, col]).strip()
+                allowed_values = {str(value).strip() for value in allowed_values}
+                if latest_value not in allowed_values:
+                    raise ValueError(
+                        f"Baris {index + 1} sudah berubah di Google Sheet. Muat ulang halaman sebelum menyimpan."
+                    )
+
+        for col in changed_columns:
+            if col not in pending_data.columns:
+                raise ValueError(f"Kolom {col} tidak ditemukan saat sinkronisasi.")
+            if col not in latest_data.columns:
+                latest_data[col] = ''
+            latest_data.at[index, col] = pending_data.at[index, col]
+
+    return latest_data
+
+def update_data(df, changed_indices=None, changed_columns=None, expected_values=None):
     try:
-        conn.update(worksheet="Sheet1", data=prepare_sheet_data(df))
+        expected_rows = st.session_state.get('loaded_sheet_rows')
+        if df is None or df.empty:
+            st.error("Penyimpanan dibatalkan: data yang akan ditulis kosong.")
+            return False
+
+        if changed_indices is None or changed_columns is None:
+            st.error("Penyimpanan dibatalkan: perubahan baris/kolom tidak diketahui.")
+            return False
+
+        sheet_data = merge_with_latest_sheet(df, changed_indices, changed_columns, expected_values)
+        nonempty_input_rows = sheet_data['input'].fillna('').astype(str).str.strip().ne('').sum()
+
+        if nonempty_input_rows < MIN_NONEMPTY_INPUT_ROWS:
+            st.error("Penyimpanan dibatalkan: kolom input terbaca kosong. Muat ulang data sebelum mencoba lagi.")
+            return False
+
+        if expected_rows is not None and len(sheet_data) < expected_rows:
+            st.error(
+                f"Penyimpanan dibatalkan: jumlah baris turun dari {expected_rows} ke {len(sheet_data)}. "
+                "Ini mencegah Google Sheet tertimpa oleh data hasil filter."
+            )
+            return False
+
+        conn.update(worksheet="Sheet1", data=sheet_data)
+        st.session_state['loaded_sheet_rows'] = len(sheet_data)
         # Clear cache untuk force reload data
         load_data.clear()
         st.cache_data.clear()
@@ -175,7 +244,12 @@ def auto_save_progress(df, index):
     df.at[index, 'validator'] = username
     df.at[index, 'status'] = "Pending"
 
-    if update_data(df):
+    if update_data(
+        df,
+        [index],
+        ['instruction_ats', 'output_ats', 'validator', 'status'],
+        expected_values={'validator': username}
+    ):
         st.toast("Progress tersimpan otomatis.", icon="✅")
 
 def show_ats_guidance():
@@ -278,6 +352,8 @@ try:
         st.info("   2. Sheet memiliki kolom: instruction_ats, input, output_ats, validator, status")
         st.info("   3. Data sudah tersedia di Sheet1")
         st.stop()
+
+    st.session_state['loaded_sheet_rows'] = len(df)
     
     # Cek kolom yang tersedia (gunakan nama kolom dari Google Sheet)
     # Priority: gunakan kolom yang sudah ada, jika tidak ada buat baru
@@ -307,9 +383,6 @@ try:
         df[col] = df[col].mask(df[col].str.lower() == 'none', '')
         # Final strip setelah semua cleaning
         df[col] = df[col].str.strip()
-    
-    # Filter hanya data yang memiliki input (tidak kosong)
-    df = df[df['input'] != '']
     
     # Debug info (untuk test purposes)
     if 'debug_mode' not in st.session_state:
@@ -358,10 +431,11 @@ except Exception as e:
 # 2. Kolom status kosong (belum pernah dikerjakan)
 # 3. Kolom input tidak kosong (harus ada input untuk diproses)
 
-available_data_mask = (df['input'] != '') & (df['validator'] == '') & (df['status'] == '')
+has_input_mask = df['input'] != ''
+available_data_mask = has_input_mask & (df['validator'] == '') & (df['status'] == '')
 
 # Data milik user ini
-my_all_tasks = df[df['validator'] == username]
+my_all_tasks = df[has_input_mask & (df['validator'] == username)]
 
 # Data milik user ini yang BELUM SELESAI (Status bukan 'Done')
 # Termasuk: data baru (status kosong), data sedang dikerjakan, etc
@@ -411,7 +485,12 @@ if sisa_tugas_saya == 0 and sisa_pool > 0:
                     df.loc[available_indices, 'validator'] = username
                     # Pastikan status kosong untuk data baru yang diambil
                     df.loc[available_indices, 'status'] = ''
-                    if update_data(df):
+                    if update_data(
+                        df,
+                        list(available_indices),
+                        ['validator', 'status'],
+                        expected_values={'validator': '', 'status': ''}
+                    ):
                         st.success(f"✅ Berhasil mengambil {len(available_indices)} data baru!")
                         time.sleep(1)
                         st.rerun()
@@ -514,7 +593,12 @@ if not working_df.empty:
                         df.at[index, 'validator'] = username
                         # Set status ke "Pending" untuk menandakan sedang dikerjakan
                         df.at[index, 'status'] = "Pending"
-                        if update_data(df):
+                        if update_data(
+                            df,
+                            [index],
+                            ['instruction_ats', 'output_ats', 'validator', 'status'],
+                            expected_values={'validator': username}
+                        ):
                             st.toast("✅ Progress tersimpan! Status: Sedang Dikerjakan", icon="✅")
                             time.sleep(0.3)
             
@@ -531,7 +615,12 @@ if not working_df.empty:
                         df.at[index, 'output_ats'] = output_val
                         df.at[index, 'validator'] = username
                         df.at[index, 'status'] = "Done"
-                        if update_data(df):
+                        if update_data(
+                            df,
+                            [index],
+                            ['instruction_ats', 'output_ats', 'validator', 'status'],
+                            expected_values={'validator': username}
+                        ):
                             st.toast("✅ Data selesai! Status diubah ke Done.", icon="✅")
                             time.sleep(0.5)
                             if not show_history:
