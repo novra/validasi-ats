@@ -3,6 +3,7 @@ import pandas as pd
 from streamlit_gsheets import GSheetsConnection
 import time
 from auth_config import AUTHORIZED_USERS, USER_CREDENTIALS
+from sheet_lock import get_sheet_write_lock
 
 # --- KONFIGURASI HALAMAN ---
 st.set_page_config(layout="wide", page_title="Online ATS Validator")
@@ -112,6 +113,28 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 SHEET_COLUMNS = ['instruction_ats', 'input', 'output_ats', 'validator', 'status']
 MIN_NONEMPTY_INPUT_ROWS = 1
 
+def normalize_cell(value):
+    if pd.isna(value):
+        return ''
+
+    text = str(value).strip()
+    if text.lower() in {'nan', 'none', '<na>'}:
+        return ''
+    return text
+
+@st.cache_resource
+def get_claim_lock():
+    return get_sheet_write_lock()
+
+def get_available_data_mask(data):
+    return (
+        (data['input'] != '')
+        & (data['instruction_ats'] == '')
+        & (data['output_ats'] == '')
+        & (data['validator'] == '')
+        & (data['status'] == '')
+    )
+
 @st.cache_data(ttl=0)
 def load_data():
     last_error = None
@@ -134,6 +157,7 @@ def prepare_sheet_data(df):
     for col in SHEET_COLUMNS:
         if col not in sheet_df.columns:
             sheet_df[col] = ''
+        sheet_df[col] = sheet_df[col].map(normalize_cell)
 
     legacy_cols = ['instruksi_ats', 'nama_validator']
     sheet_df = sheet_df.drop(columns=[col for col in legacy_cols if col in sheet_df.columns])
@@ -169,8 +193,8 @@ def merge_with_latest_sheet(df, changed_indices, changed_columns, expected_value
                     latest_data[col] = ''
                 if not isinstance(allowed_values, (list, tuple, set)):
                     allowed_values = [allowed_values]
-                latest_value = str(latest_data.at[index, col]).strip()
-                allowed_values = {str(value).strip() for value in allowed_values}
+                latest_value = normalize_cell(latest_data.at[index, col])
+                allowed_values = {normalize_cell(value) for value in allowed_values}
                 if latest_value not in allowed_values:
                     raise ValueError(
                         f"Baris {index + 1} sudah berubah di Google Sheet. Muat ulang halaman sebelum menyimpan."
@@ -185,29 +209,37 @@ def merge_with_latest_sheet(df, changed_indices, changed_columns, expected_value
 
     return latest_data
 
-def update_data(df, changed_indices=None, changed_columns=None, expected_values=None):
+def update_data(df, changed_indices=None, changed_columns=None, expected_values=None, show_errors=True):
+    with get_claim_lock():
+        return update_data_unlocked(df, changed_indices, changed_columns, expected_values, show_errors)
+
+def update_data_unlocked(df, changed_indices=None, changed_columns=None, expected_values=None, show_errors=True):
     try:
         expected_rows = st.session_state.get('loaded_sheet_rows')
         if df is None or df.empty:
-            st.error("Penyimpanan dibatalkan: data yang akan ditulis kosong.")
+            if show_errors:
+                st.error("Penyimpanan dibatalkan: data yang akan ditulis kosong.")
             return False
 
         if changed_indices is None or changed_columns is None:
-            st.error("Penyimpanan dibatalkan: perubahan baris/kolom tidak diketahui.")
+            if show_errors:
+                st.error("Penyimpanan dibatalkan: perubahan baris/kolom tidak diketahui.")
             return False
 
         sheet_data = merge_with_latest_sheet(df, changed_indices, changed_columns, expected_values)
         nonempty_input_rows = sheet_data['input'].fillna('').astype(str).str.strip().ne('').sum()
 
         if nonempty_input_rows < MIN_NONEMPTY_INPUT_ROWS:
-            st.error("Penyimpanan dibatalkan: kolom input terbaca kosong. Muat ulang data sebelum mencoba lagi.")
+            if show_errors:
+                st.error("Penyimpanan dibatalkan: kolom input terbaca kosong. Muat ulang data sebelum mencoba lagi.")
             return False
 
         if expected_rows is not None and len(sheet_data) < expected_rows:
-            st.error(
-                f"Penyimpanan dibatalkan: jumlah baris turun dari {expected_rows} ke {len(sheet_data)}. "
-                "Ini mencegah Google Sheet tertimpa oleh data hasil filter."
-            )
+            if show_errors:
+                st.error(
+                    f"Penyimpanan dibatalkan: jumlah baris turun dari {expected_rows} ke {len(sheet_data)}. "
+                    "Ini mencegah Google Sheet tertimpa oleh data hasil filter."
+                )
             return False
 
         conn.update(worksheet="Sheet1", data=sheet_data)
@@ -217,8 +249,69 @@ def update_data(df, changed_indices=None, changed_columns=None, expected_values=
         st.cache_data.clear()
         return True
     except Exception as e:
-        st.error(f"Gagal menyimpan ke Google Sheets: {e}")
+        if show_errors:
+            st.error(f"Gagal menyimpan ke Google Sheets: {e}")
         return False
+
+def claim_new_tasks(batch_size):
+    with get_claim_lock():
+        available_indices = []
+        for _ in range(3):
+            latest_df = conn.read(worksheet="Sheet1", ttl=0)
+            if latest_df is None or latest_df.empty:
+                st.error("Tidak dapat mengambil tugas: Google Sheet kosong atau tidak dapat dibaca.")
+                return 0
+
+            latest_data = prepare_sheet_data(latest_df)
+            available_indices = latest_data[get_available_data_mask(latest_data)].head(batch_size).index
+
+            if len(available_indices) == 0:
+                st.error("Data habis diambil orang lain!")
+                return 0
+
+            latest_data.loc[available_indices, 'validator'] = username
+            latest_data.loc[available_indices, 'status'] = ''
+
+            saved = update_data_unlocked(
+                latest_data,
+                list(available_indices),
+                ['validator', 'status'],
+                expected_values={
+                    'instruction_ats': '',
+                    'output_ats': '',
+                    'validator': '',
+                    'status': ''
+                },
+                show_errors=False
+            )
+            if saved:
+                break
+        else:
+            st.warning("Tugas yang tersedia baru saja berubah. Silakan klik Ambil Tugas Baru lagi.")
+            load_data.clear()
+            st.cache_data.clear()
+            return 0
+
+        verified_df = conn.read(worksheet="Sheet1", ttl=0)
+        verified_data = prepare_sheet_data(verified_df)
+        verified_count = len(
+            [
+                index for index in available_indices
+                if index in verified_data.index
+                and verified_data.at[index, 'validator'] == username
+                and verified_data.at[index, 'instruction_ats'] == ''
+                and verified_data.at[index, 'output_ats'] == ''
+                and verified_data.at[index, 'status'] == ''
+            ]
+        )
+
+        if verified_count != len(available_indices):
+            st.error("Sebagian tugas gagal dikunci karena ada update bersamaan. Silakan ambil ulang.")
+            load_data.clear()
+            st.cache_data.clear()
+            return 0
+
+        return verified_count
 
 def auto_save_progress(df, index):
     if index not in df.index:
@@ -239,6 +332,9 @@ def auto_save_progress(df, index):
     ):
         return
 
+    expected_instruction = df.at[index, 'instruction_ats']
+    expected_output = df.at[index, 'output_ats']
+
     df.at[index, 'instruction_ats'] = current_instr
     df.at[index, 'output_ats'] = current_output
     df.at[index, 'validator'] = username
@@ -248,7 +344,12 @@ def auto_save_progress(df, index):
         df,
         [index],
         ['instruction_ats', 'output_ats', 'validator', 'status'],
-        expected_values={'validator': username}
+        expected_values={
+            'instruction_ats': expected_instruction,
+            'output_ats': expected_output,
+            'validator': username,
+            'status': ['', 'Pending']
+        }
     ):
         st.toast("Progress tersimpan otomatis.", icon="✅")
 
@@ -409,8 +510,8 @@ try:
         st.sidebar.write(f"✓ Data dengan status 'Done': {data_with_done_status}")
         st.sidebar.write(f"✓ Data dengan status kosong/Done: {data_with_empty_or_done}")
         
-        available_count = len(df[(df['input'] != '') & (df['validator'] == '') & (df['status'] == '')])
-        st.sidebar.write(f"🎯 **DATA TERSEDIA (kombinasi ketiga kondisi): {available_count}**")
+        available_count = len(df[get_available_data_mask(df)])
+        st.sidebar.write(f"🎯 **DATA TERSEDIA (hanya input terisi): {available_count}**")
         
         st.sidebar.divider()
         st.sidebar.write("**Data Preview:**")
@@ -427,12 +528,14 @@ except Exception as e:
 
 # --- LOGIKA DATA TERSEDIA (PENDING vs DONE) ---
 # Data tersedia untuk diambil jika:
-# 1. Kolom validator kosong (belum diambil siapapun)
-# 2. Kolom status kosong (belum pernah dikerjakan)
-# 3. Kolom input tidak kosong (harus ada input untuk diproses)
+# 1. Kolom input tidak kosong (harus ada input untuk diproses)
+# 2. Kolom instruction_ats kosong
+# 3. Kolom output_ats kosong
+# 4. Kolom validator kosong (belum diambil siapapun)
+# 5. Kolom status kosong (belum pernah dikerjakan)
 
 has_input_mask = df['input'] != ''
-available_data_mask = has_input_mask & (df['validator'] == '') & (df['status'] == '')
+available_data_mask = get_available_data_mask(df)
 
 # Data milik user ini
 my_all_tasks = df[has_input_mask & (df['validator'] == username)]
@@ -477,23 +580,12 @@ if sisa_tugas_saya == 0 and sisa_pool > 0:
             st.form_submit_button("❌ Batal", use_container_width=True)
         
         if submitted:
-            available_indices = df[available_data_mask].head(batch_size).index
-            if len(available_indices) == 0:
-                st.error("❌ Data habis diambil orang lain!")
-            else:
-                with st.spinner("⏳ Mengambil data..."):
-                    df.loc[available_indices, 'validator'] = username
-                    # Pastikan status kosong untuk data baru yang diambil
-                    df.loc[available_indices, 'status'] = ''
-                    if update_data(
-                        df,
-                        list(available_indices),
-                        ['validator', 'status'],
-                        expected_values={'validator': '', 'status': ''}
-                    ):
-                        st.success(f"✅ Berhasil mengambil {len(available_indices)} data baru!")
-                        time.sleep(1)
-                        st.rerun()
+            with st.spinner("Mengambil data..."):
+                claimed_count = claim_new_tasks(batch_size)
+                if claimed_count > 0:
+                    st.success(f"Berhasil mengambil {claimed_count} data baru!")
+                    time.sleep(1)
+                    st.rerun()
 
 # --- BAGIAN AREA KERJA ---
 show_history = st.checkbox("📚 Tampilkan riwayat tugas yang sudah selesai", value=False)
@@ -588,6 +680,8 @@ if not working_df.empty:
                     disabled=is_done
                 ):
                     with st.spinner("💫 Menyimpan progress..."):
+                        expected_instruction = row.get('instruction_ats', '')
+                        expected_output = row.get('output_ats', '')
                         df.at[index, 'instruction_ats'] = instruksi_val
                         df.at[index, 'output_ats'] = output_val
                         df.at[index, 'validator'] = username
@@ -597,7 +691,12 @@ if not working_df.empty:
                             df,
                             [index],
                             ['instruction_ats', 'output_ats', 'validator', 'status'],
-                            expected_values={'validator': username}
+                            expected_values={
+                                'instruction_ats': expected_instruction,
+                                'output_ats': expected_output,
+                                'validator': username,
+                                'status': ['', 'Pending']
+                            }
                         ):
                             st.toast("✅ Progress tersimpan! Status: Sedang Dikerjakan", icon="✅")
                             time.sleep(0.3)
@@ -611,6 +710,8 @@ if not working_df.empty:
                     disabled=is_done
                 ):
                     with st.spinner("💫 Menyelesaikan data..."):
+                        expected_instruction = row.get('instruction_ats', '')
+                        expected_output = row.get('output_ats', '')
                         df.at[index, 'instruction_ats'] = instruksi_val
                         df.at[index, 'output_ats'] = output_val
                         df.at[index, 'validator'] = username
@@ -619,7 +720,12 @@ if not working_df.empty:
                             df,
                             [index],
                             ['instruction_ats', 'output_ats', 'validator', 'status'],
-                            expected_values={'validator': username}
+                            expected_values={
+                                'instruction_ats': expected_instruction,
+                                'output_ats': expected_output,
+                                'validator': username,
+                                'status': ['', 'Pending']
+                            }
                         ):
                             st.toast("✅ Data selesai! Status diubah ke Done.", icon="✅")
                             time.sleep(0.5)

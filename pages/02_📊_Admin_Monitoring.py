@@ -4,6 +4,7 @@ from streamlit_gsheets import GSheetsConnection
 import plotly.graph_objects as go
 import plotly.express as px
 from auth_config import AUTHORIZED_USERS
+from sheet_lock import get_sheet_write_lock
 
 # --- KONFIGURASI HALAMAN ---
 st.set_page_config(layout="wide", page_title="Admin Monitoring Pelabelan")
@@ -17,6 +18,15 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 SHEET_COLUMNS = ['instruction_ats', 'input', 'output_ats', 'validator', 'status']
 MIN_NONEMPTY_INPUT_ROWS = 1
 
+def normalize_cell(value):
+    if pd.isna(value):
+        return ''
+
+    text = str(value).strip()
+    if text.lower() in {'nan', 'none', '<na>'}:
+        return ''
+    return text
+
 def load_data():
     return conn.read(worksheet="Sheet1", ttl=0)
 
@@ -26,6 +36,7 @@ def prepare_sheet_data(df):
     for col in SHEET_COLUMNS:
         if col not in sheet_df.columns:
             sheet_df[col] = ''
+        sheet_df[col] = sheet_df[col].map(normalize_cell)
 
     legacy_cols = ['instruksi_ats', 'nama_validator']
     sheet_df = sheet_df.drop(columns=[col for col in legacy_cols if col in sheet_df.columns])
@@ -65,6 +76,10 @@ def merge_with_latest_sheet(df, changed_indices, changed_columns):
     return latest_data
 
 def update_data(df, changed_indices=None, changed_columns=None):
+    with get_sheet_write_lock():
+        return update_data_unlocked(df, changed_indices, changed_columns)
+
+def update_data_unlocked(df, changed_indices=None, changed_columns=None):
     try:
         expected_rows = st.session_state.get('admin_loaded_sheet_rows')
         if df is None or df.empty:
@@ -196,10 +211,17 @@ def calculate_stats(df, username):
 visible_df = df[has_input_mask].copy()
 
 total_data = len(visible_df)
+unassigned_mask = (
+    (visible_df['input'] != '')
+    & (visible_df['instruction_ats'] == '')
+    & (visible_df['output_ats'] == '')
+    & (visible_df['validator'] == '')
+    & (visible_df['status'] == '')
+)
 total_done = len(visible_df[visible_df['status'] == 'Done'])
 total_pending = len(visible_df[(visible_df['validator'] != '') & (visible_df['status'] != 'Done') & (visible_df['status'] != '')])
 total_available = len(visible_df[(visible_df['validator'] != '') & (visible_df['status'] == '')])
-total_unassigned = len(visible_df[(visible_df['validator'] == '') & (visible_df['status'] == '')])
+total_unassigned = len(visible_df[unassigned_mask])
 
 # --- TAMPILKAN STATISTIK GLOBAL ---
 st.markdown("### 📈 Statistik Keseluruhan")
@@ -401,7 +423,13 @@ if "Semua" not in filter_status and filter_status:
         elif status == "Sedang Dikerjakan":
             status_filters.append((filtered_df['status'] != 'Done') & (filtered_df['status'] != ''))
         elif status == "Belum Diambil":
-            status_filters.append(filtered_df['validator'] == '')
+            status_filters.append(
+                (filtered_df['input'] != '')
+                & (filtered_df['instruction_ats'] == '')
+                & (filtered_df['output_ats'] == '')
+                & (filtered_df['validator'] == '')
+                & (filtered_df['status'] == '')
+            )
     
     if status_filters:
         filtered_df = filtered_df[pd.concat(status_filters, axis=1).any(axis=1)]
