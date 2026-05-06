@@ -15,6 +15,8 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 
 SHEET_COLUMNS = ['instruction_ats', 'input', 'output_ats', 'validator', 'status']
 MIN_NONEMPTY_INPUT_ROWS = 1
+MAX_SHEET_CELL_CHARS = 50000
+LENGTH_LIMIT_COLUMNS = ['instruction_ats', 'output_ats']
 PROBLEM_KEYWORDS_LABEL = "sama, serupa, double, seperti sebelumnya, atau terlalu banyak"
 PROBLEM_PATTERN = r"\b(?:sama|serupa|double)\b|seperti\s+sebelumnya|terlalu\s+banyak"
 
@@ -51,6 +53,17 @@ def row_has_problem_label(row):
         pd.Series([instruction]).str.contains(PROBLEM_PATTERN, case=False, na=False, regex=True).iloc[0]
         or pd.Series([output]).str.contains(PROBLEM_PATTERN, case=False, na=False, regex=True).iloc[0]
     )
+
+def get_ats_length_violations(df, changed_indices):
+    violations = []
+    for index in changed_indices:
+        if index not in df.index:
+            continue
+        for col in LENGTH_LIMIT_COLUMNS:
+            value_length = len(normalize_cell(df.at[index, col]))
+            if value_length > MAX_SHEET_CELL_CHARS:
+                violations.append((index + 1, col, value_length))
+    return violations
 
 def merge_with_latest_sheet(df, changed_indices, changed_columns, expected_values=None):
     latest_df = conn.read(worksheet="Sheet1", ttl=0)
@@ -127,6 +140,18 @@ def update_data_unlocked(df, changed_indices=None, changed_columns=None, expecte
             )
             return False
 
+        length_violations = get_ats_length_violations(sheet_data, changed_indices)
+        if length_violations:
+            details = ", ".join(
+                f"baris {row} kolom {col}: {length:,} karakter"
+                for row, col, length in length_violations
+            )
+            st.error(
+                f"Update dibatalkan: {details}. "
+                f"Batas maksimal Google Sheets adalah {MAX_SHEET_CELL_CHARS:,} karakter per cell."
+            )
+            return False
+
         conn.update(worksheet="Sheet1", data=sheet_data)
         st.session_state['admin_loaded_sheet_rows'] = len(sheet_data)
         return True
@@ -178,6 +203,18 @@ def replace_problem_inputs(selected_indices, replacement_input, expected_values)
             latest_data.loc[selected_indices, 'input'] = replacement_input.strip()
             latest_data.loc[selected_indices, ['instruction_ats', 'output_ats']] = ''
             latest_data.loc[selected_indices, 'status'] = 'Pending'
+
+            length_violations = get_ats_length_violations(latest_data, selected_indices)
+            if length_violations:
+                details = ", ".join(
+                    f"baris {row} kolom {col}: {length:,} karakter"
+                    for row, col, length in length_violations
+                )
+                st.error(
+                    f"Replace dibatalkan: {details}. "
+                    f"Batas maksimal Google Sheets adalah {MAX_SHEET_CELL_CHARS:,} karakter per cell."
+                )
+                return False
 
             conn.update(worksheet="Sheet1", data=latest_data)
             st.session_state['admin_loaded_sheet_rows'] = len(latest_data)
@@ -339,6 +376,20 @@ ready_ats_mask = (
 )
 total_ready_ats = len(visible_df[ready_ats_mask])
 ready_ats_df = visible_df[ready_ats_mask].copy()
+instruction_lengths = visible_df['instruction_ats'].map(lambda value: len(normalize_cell(value)))
+output_lengths = visible_df['output_ats'].map(lambda value: len(normalize_cell(value)))
+over_limit_mask = (
+    (instruction_lengths > MAX_SHEET_CELL_CHARS)
+    | (output_lengths > MAX_SHEET_CELL_CHARS)
+)
+near_limit_mask = (
+    (instruction_lengths > int(MAX_SHEET_CELL_CHARS * 0.9))
+    | (output_lengths > int(MAX_SHEET_CELL_CHARS * 0.9))
+)
+total_over_length_limit = int(over_limit_mask.sum())
+total_near_length_limit = int(near_limit_mask.sum())
+max_instruction_length = int(instruction_lengths.max()) if not instruction_lengths.empty else 0
+max_output_length = int(output_lengths.max()) if not output_lengths.empty else 0
 
 # --- TAMPILKAN STATISTIK GLOBAL ---
 st.markdown("### 📈 Statistik Keseluruhan")
@@ -360,6 +411,22 @@ with col6:
     st.metric("Gagal Dilabeli", total_failed_labeled)
 with col7:
     st.metric("ATS Siap Pakai", total_ready_ats)
+
+col8, col9, col10, col11 = st.columns(4)
+with col8:
+    st.metric("ATS > Batas Karakter", total_over_length_limit)
+with col9:
+    st.metric("ATS Mendekati Batas", total_near_length_limit)
+with col10:
+    st.metric("Max instruction_ats", max_instruction_length)
+with col11:
+    st.metric("Max output_ats", max_output_length)
+
+if total_over_length_limit > 0:
+    st.warning(
+        f"Ada {total_over_length_limit} data dengan instruction_ats/output_ats melebihi "
+        f"{MAX_SHEET_CELL_CHARS:,} karakter. Penyimpanan/update untuk baris tersebut akan dibatalkan."
+    )
 
 st.divider()
 

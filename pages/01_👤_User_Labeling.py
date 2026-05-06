@@ -112,6 +112,8 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 
 SHEET_COLUMNS = ['instruction_ats', 'input', 'output_ats', 'validator', 'status']
 MIN_NONEMPTY_INPUT_ROWS = 1
+MAX_SHEET_CELL_CHARS = 50000
+LENGTH_LIMIT_COLUMNS = ['instruction_ats', 'output_ats']
 
 def normalize_cell(value):
     if pd.isna(value):
@@ -126,6 +128,38 @@ def has_required_ats_fields(row):
     return (
         normalize_cell(row.get('instruction_ats', '')) != ''
         and normalize_cell(row.get('output_ats', '')) != ''
+    )
+
+def get_ats_length_violations(df, changed_indices):
+    violations = []
+    for index in changed_indices:
+        if index not in df.index:
+            continue
+        for col in LENGTH_LIMIT_COLUMNS:
+            value_length = len(normalize_cell(df.at[index, col]))
+            if value_length > MAX_SHEET_CELL_CHARS:
+                violations.append((index + 1, col, value_length))
+    return violations
+
+def get_current_ats_length_violations(index, instruction_value, output_value):
+    values = {
+        'instruction_ats': instruction_value,
+        'output_ats': output_value,
+    }
+    return [
+        (index + 1, col, len(normalize_cell(value)))
+        for col, value in values.items()
+        if len(normalize_cell(value)) > MAX_SHEET_CELL_CHARS
+    ]
+
+def show_length_violation_error(violations, action_label="Penyimpanan"):
+    details = ", ".join(
+        f"baris {row} kolom {col}: {length:,} karakter"
+        for row, col, length in violations
+    )
+    st.error(
+        f"{action_label} dibatalkan: {details}. "
+        f"Batas maksimal Google Sheets adalah {MAX_SHEET_CELL_CHARS:,} karakter per cell."
     )
 
 def fill_ats_shortcut(index, value):
@@ -279,6 +313,12 @@ def update_data_unlocked(df, changed_indices=None, changed_columns=None, expecte
                 st.error(
                     f"Penyimpanan dibatalkan: baris {rows} belum mengisi instruction_ats dan output_ats."
                 )
+            return False
+
+        length_violations = get_ats_length_violations(sheet_data, changed_indices)
+        if length_violations:
+            if show_errors:
+                show_length_violation_error(length_violations)
             return False
 
         conn.update(worksheet="Sheet1", data=sheet_data)
@@ -681,6 +721,7 @@ if not working_df.empty:
                     label="Instruction ATS",
                     value=row.get('instruction_ats', ''),
                     height=140,
+                    max_chars=MAX_SHEET_CELL_CHARS,
                     label_visibility="collapsed",
                     key=f"instr_{index}",
                     placeholder="Isi klasifikasi ATS berdasarkan instruksi...",
@@ -699,6 +740,7 @@ if not working_df.empty:
                     label="Output ATS",
                     value=row.get('output_ats', ''),
                     height=140,
+                    max_chars=MAX_SHEET_CELL_CHARS,
                     label_visibility="collapsed",
                     key=f"output_{index}",
                     placeholder="Isi hasil triase/output ATS...",
@@ -734,7 +776,11 @@ if not working_df.empty:
             )
             if not is_done and not can_mark_done:
                 st.warning("Isi instruction_ats dan output_ats sebelum menandai tugas sebagai selesai.")
-            
+
+            current_length_violations = get_current_ats_length_violations(index, instruksi_val, output_val)
+            if current_length_violations:
+                show_length_violation_error(current_length_violations)
+             
             # ROW 3: BUTTONS
             st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
             
@@ -748,6 +794,10 @@ if not working_df.empty:
                     disabled=is_done
                 ):
                     with st.spinner("💫 Menyimpan progress..."):
+                        current_length_violations = get_current_ats_length_violations(index, instruksi_val, output_val)
+                        if current_length_violations:
+                            show_length_violation_error(current_length_violations)
+                            st.stop()
                         expected_instruction = row.get('instruction_ats', '')
                         expected_output = row.get('output_ats', '')
                         df.at[index, 'instruction_ats'] = instruksi_val
@@ -778,6 +828,10 @@ if not working_df.empty:
                     disabled=is_done or not can_mark_done
                 ):
                     with st.spinner("💫 Menyelesaikan data..."):
+                        current_length_violations = get_current_ats_length_violations(index, instruksi_val, output_val)
+                        if current_length_violations:
+                            show_length_violation_error(current_length_violations, action_label="Tandai selesai")
+                            st.stop()
                         expected_instruction = row.get('instruction_ats', '')
                         expected_output = row.get('output_ats', '')
                         df.at[index, 'instruction_ats'] = instruksi_val
