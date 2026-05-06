@@ -4,20 +4,18 @@ from io import BytesIO
 from streamlit_gsheets import GSheetsConnection
 import plotly.graph_objects as go
 import plotly.express as px
-from auth_config import AUTHORIZED_USERS
+from auth_config import AUTHORIZED_USERS, ADMIN_CREDENTIALS, AUTHORIZED_ADMINS, REPLACEMENT_ADMINS
 from sheet_lock import get_sheet_write_lock
 
 # --- KONFIGURASI HALAMAN ---
 st.set_page_config(layout="wide", page_title="Admin Monitoring Pelabelan")
-
-# --- AUTHORIZED ADMINS ---
-AUTHORIZED_ADMINS = ["admin"]
 
 # --- KONEKSI KE GOOGLE SHEETS ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 SHEET_COLUMNS = ['instruction_ats', 'input', 'output_ats', 'validator', 'status']
 MIN_NONEMPTY_INPUT_ROWS = 1
+PROBLEM_PATTERN = r"\b(?:sama|serupa)\b|terlalu\s+banyak"
 
 def normalize_cell(value):
     if pd.isna(value):
@@ -44,6 +42,14 @@ def prepare_sheet_data(df):
 
     ordered_cols = SHEET_COLUMNS + [col for col in sheet_df.columns if col not in SHEET_COLUMNS]
     return sheet_df[ordered_cols]
+
+def row_has_problem_label(row):
+    instruction = normalize_cell(row.get('instruction_ats', ''))
+    output = normalize_cell(row.get('output_ats', ''))
+    return (
+        pd.Series([instruction]).str.contains(PROBLEM_PATTERN, case=False, na=False, regex=True).iloc[0]
+        or pd.Series([output]).str.contains(PROBLEM_PATTERN, case=False, na=False, regex=True).iloc[0]
+    )
 
 def merge_with_latest_sheet(df, changed_indices, changed_columns, expected_values=None):
     latest_df = conn.read(worksheet="Sheet1", ttl=0)
@@ -127,18 +133,93 @@ def update_data_unlocked(df, changed_indices=None, changed_columns=None, expecte
         st.error(f"Gagal update Google Sheet: {e}")
         return False
 
+def replace_problem_inputs(selected_indices, replacement_input, expected_values):
+    try:
+        with get_sheet_write_lock():
+            expected_rows = st.session_state.get('admin_loaded_sheet_rows')
+            latest_df = conn.read(worksheet="Sheet1", ttl=0)
+            if latest_df is None or latest_df.empty:
+                st.error("Replace dibatalkan: Google Sheet terbaru kosong atau tidak dapat dibaca.")
+                return False
+
+            latest_data = prepare_sheet_data(latest_df)
+            if expected_rows is not None and len(latest_data) < expected_rows:
+                st.error(
+                    f"Replace dibatalkan: jumlah baris turun dari {expected_rows} ke {len(latest_data)}. "
+                    "Muat ulang data sebelum mencoba lagi."
+                )
+                return False
+
+            for index in selected_indices:
+                if index not in latest_data.index:
+                    st.error(f"Replace dibatalkan: baris {index + 1} tidak ditemukan di Google Sheet terbaru.")
+                    return False
+
+                for col, expected_by_row in expected_values.items():
+                    if col not in latest_data.columns:
+                        latest_data[col] = ''
+                    latest_value = normalize_cell(latest_data.at[index, col])
+                    expected_value = normalize_cell(expected_by_row.get(index, ''))
+                    if latest_value != expected_value:
+                        st.error(
+                            f"Replace dibatalkan: baris {index + 1} sudah berubah oleh admin/user lain. "
+                            "Muat ulang halaman sebelum mencoba lagi."
+                        )
+                        return False
+
+                if not row_has_problem_label(latest_data.loc[index]):
+                    st.error(
+                        f"Replace dibatalkan: baris {index + 1} sudah tidak masuk filter label bermasalah. "
+                        "Muat ulang halaman sebelum mencoba lagi."
+                    )
+                    return False
+
+            latest_data.loc[selected_indices, 'input'] = replacement_input.strip()
+            latest_data.loc[selected_indices, ['instruction_ats', 'output_ats']] = ''
+            latest_data.loc[selected_indices, 'status'] = 'Pending'
+
+            conn.update(worksheet="Sheet1", data=latest_data)
+            st.session_state['admin_loaded_sheet_rows'] = len(latest_data)
+
+            verified_df = conn.read(worksheet="Sheet1", ttl=0)
+            verified_data = prepare_sheet_data(verified_df)
+            for index in selected_indices:
+                if (
+                    normalize_cell(verified_data.at[index, 'input']) != replacement_input.strip()
+                    or normalize_cell(verified_data.at[index, 'instruction_ats']) != ''
+                    or normalize_cell(verified_data.at[index, 'output_ats']) != ''
+                    or normalize_cell(verified_data.at[index, 'status']) != 'Pending'
+                ):
+                    st.warning(
+                        "Replace terkirim, tetapi hasil verifikasi berbeda dari yang diharapkan. "
+                        "Muat ulang halaman untuk melihat data terbaru."
+                    )
+                    return False
+
+            return True
+    except Exception as e:
+        st.error(f"Gagal replace input: {e}")
+        return False
+
 # --- LOGIN ADMIN ---
 if not st.session_state.get('admin_logged_in', False):
     st.title("🔐 Admin Monitoring Panel")
-    st.markdown("### Silakan masukkan password admin untuk mengakses monitoring")
+    st.markdown("### Silakan pilih admin dan masukkan password untuk mengakses monitoring")
     
     col1, col2 = st.columns([1, 2])
     with col1:
+        selected_admin = st.selectbox(
+            "User Admin:",
+            options=AUTHORIZED_ADMINS,
+            index=None,
+            placeholder="Pilih user admin..."
+        )
         admin_pass = st.text_input("Password Admin:", type="password", placeholder="Masukkan password...")
         
         if st.button("🔓 Akses Admin", type="primary", use_container_width=True):
-            if admin_pass == "TriaseBRIN2026":
+            if selected_admin and admin_pass == ADMIN_CREDENTIALS.get(selected_admin):
                 st.session_state['admin_logged_in'] = True
+                st.session_state['admin_username'] = selected_admin
                 st.rerun()
             else:
                 st.error("❌ Password salah!")
@@ -159,14 +240,19 @@ col1, col2 = st.sidebar.columns(2)
 with col1:
     if st.sidebar.button("🏠 Kembali", use_container_width=True, help="Kembali ke halaman utama"):
         st.session_state['admin_logged_in'] = False
+        st.session_state.pop('admin_username', None)
         st.switch_page("app.py")
 
 with col2:
     if st.sidebar.button("🚪 Logout", use_container_width=True):
         st.session_state['admin_logged_in'] = False
+        st.session_state.pop('admin_username', None)
         st.rerun()
 
 st.sidebar.divider()
+admin_username = st.session_state.get('admin_username', 'admin')
+can_replace_input = admin_username in REPLACEMENT_ADMINS
+st.sidebar.caption(f"Admin aktif: {admin_username}")
 
 st.title("📊 Admin Monitoring Panel - Pelabelan ATS")
 st.markdown("Dashboard monitoring progress pelabelan masing-masing user")
@@ -226,10 +312,9 @@ def calculate_stats(df, username):
 # --- HITUNG STATISTIK GLOBAL ---
 visible_df = df[has_input_mask].copy()
 
-problem_pattern = r"\b(?:sama|serupa)\b|terlalu\s+banyak"
 problem_text_mask = (
-    visible_df['instruction_ats'].str.contains(problem_pattern, case=False, na=False, regex=True)
-    | visible_df['output_ats'].str.contains(problem_pattern, case=False, na=False, regex=True)
+    visible_df['instruction_ats'].str.contains(PROBLEM_PATTERN, case=False, na=False, regex=True)
+    | visible_df['output_ats'].str.contains(PROBLEM_PATTERN, case=False, na=False, regex=True)
 )
 
 total_data = len(visible_df)
@@ -491,8 +576,8 @@ st.markdown("### Replace Input Berdasarkan Label Bermasalah")
 problem_mask = (
     has_input_mask
     & (
-        df['instruction_ats'].str.contains(problem_pattern, case=False, na=False, regex=True)
-        | df['output_ats'].str.contains(problem_pattern, case=False, na=False, regex=True)
+        df['instruction_ats'].str.contains(PROBLEM_PATTERN, case=False, na=False, regex=True)
+        | df['output_ats'].str.contains(PROBLEM_PATTERN, case=False, na=False, regex=True)
     )
 )
 problem_df = df[problem_mask].copy()
@@ -530,8 +615,10 @@ else:
     )
 
     confirm_replace = st.checkbox("Saya yakin ingin mengganti input untuk baris yang dipilih.")
+    if not can_replace_input:
+        st.warning("Admin ini tidak memiliki akses untuk proses replacement.")
 
-    if st.button("Replace Input Terpilih", type="primary", use_container_width=True):
+    if st.button("Replace Input Terpilih", type="primary", use_container_width=True, disabled=not can_replace_input):
         selected_indices = [row_options[label] for label in selected_rows]
 
         if not selected_indices:
@@ -563,16 +650,7 @@ else:
                     for index in selected_indices
                 },
             }
-            df.loc[selected_indices, 'input'] = replacement_input.strip()
-            df.loc[selected_indices, ['instruction_ats', 'output_ats']] = ''
-            df.loc[selected_indices, 'status'] = 'Pending'
-
-            if update_data(
-                df,
-                selected_indices,
-                ['input', 'instruction_ats', 'output_ats', 'status'],
-                expected_values=expected_replace_values
-            ):
+            if replace_problem_inputs(selected_indices, replacement_input, expected_replace_values):
                 st.success(f"Berhasil mengganti input untuk {len(selected_indices)} baris.")
                 st.rerun()
 
