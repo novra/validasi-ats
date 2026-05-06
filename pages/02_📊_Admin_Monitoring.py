@@ -15,7 +15,8 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 
 SHEET_COLUMNS = ['instruction_ats', 'input', 'output_ats', 'validator', 'status']
 MIN_NONEMPTY_INPUT_ROWS = 1
-PROBLEM_PATTERN = r"\b(?:sama|serupa)\b|terlalu\s+banyak"
+PROBLEM_KEYWORDS_LABEL = "sama, serupa, double, seperti sebelumnya, atau terlalu banyak"
+PROBLEM_PATTERN = r"\b(?:sama|serupa|double)\b|seperti\s+sebelumnya|terlalu\s+banyak"
 
 def normalize_cell(value):
     if pd.isna(value):
@@ -582,11 +583,11 @@ problem_mask = (
 )
 problem_df = df[problem_mask].copy()
 
-st.caption("Filter otomatis mencari data dengan instruction_ats atau output_ats yang mengandung kata: sama, serupa, atau terlalu banyak.")
+st.caption(f"Filter otomatis mencari data dengan instruction_ats atau output_ats yang mengandung kata: {PROBLEM_KEYWORDS_LABEL}.")
 st.metric("Data terfilter", len(problem_df))
 
 if problem_df.empty:
-    st.info("Tidak ada data dengan instruction_ats atau output_ats yang mengandung kata 'sama', 'serupa', atau 'terlalu banyak'.")
+    st.info(f"Tidak ada data dengan instruction_ats atau output_ats yang mengandung kata: {PROBLEM_KEYWORDS_LABEL}.")
 else:
     preview_cols = ['validator', 'status', 'input', 'instruction_ats', 'output_ats']
     preview_df = problem_df[preview_cols].copy()
