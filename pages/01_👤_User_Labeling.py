@@ -122,6 +122,30 @@ def normalize_cell(value):
         return ''
     return text
 
+def has_required_ats_fields(row):
+    return (
+        normalize_cell(row.get('instruction_ats', '')) != ''
+        and normalize_cell(row.get('output_ats', '')) != ''
+    )
+
+def fill_ats_shortcut(index, value):
+    st.session_state[f"instr_{index}"] = value
+    st.session_state[f"output_{index}"] = value
+
+def sync_task_widget_state(index, row):
+    source_signature = (
+        normalize_cell(row.get('input', '')),
+        normalize_cell(row.get('instruction_ats', '')),
+        normalize_cell(row.get('output_ats', '')),
+        normalize_cell(row.get('status', '')),
+    )
+    source_key = f"task_source_{index}"
+
+    if st.session_state.get(source_key) != source_signature:
+        st.session_state[f"instr_{index}"] = source_signature[1]
+        st.session_state[f"output_{index}"] = source_signature[2]
+        st.session_state[source_key] = source_signature
+
 @st.cache_resource
 def get_claim_lock():
     return get_sheet_write_lock()
@@ -239,6 +263,21 @@ def update_data_unlocked(df, changed_indices=None, changed_columns=None, expecte
                 st.error(
                     f"Penyimpanan dibatalkan: jumlah baris turun dari {expected_rows} ke {len(sheet_data)}. "
                     "Ini mencegah Google Sheet tertimpa oleh data hasil filter."
+                )
+            return False
+
+        done_without_required_fields = [
+            index + 1
+            for index in changed_indices
+            if index in sheet_data.index
+            and normalize_cell(sheet_data.at[index, 'status']) == "Done"
+            and not has_required_ats_fields(sheet_data.loc[index])
+        ]
+        if done_without_required_fields:
+            if show_errors:
+                rows = ", ".join(map(str, done_without_required_fields))
+                st.error(
+                    f"Penyimpanan dibatalkan: baris {rows} belum mengisi instruction_ats dan output_ats."
                 )
             return False
 
@@ -604,6 +643,7 @@ if not working_df.empty:
         with st.container():
             # Tanda visual jika sudah selesai
             is_done = row.get('status') == 'Done'
+            sync_task_widget_state(index, row)
             status_icon = "✅ SELESAI" if is_done else "⏳ BELUM SELESAI"
             
             # Header dengan status
@@ -666,6 +706,34 @@ if not working_df.empty:
                     on_change=auto_save_progress,
                     args=(df, index)
                 )
+
+            st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
+            col_similar, col_too_many = st.columns(2, gap="small")
+            with col_similar:
+                st.button(
+                    "Serupa",
+                    key=f"shortcut_serupa_{index}",
+                    use_container_width=True,
+                    disabled=is_done,
+                    on_click=fill_ats_shortcut,
+                    args=(index, "serupa")
+                )
+            with col_too_many:
+                st.button(
+                    "Kasus terlalu banyak",
+                    key=f"shortcut_too_many_{index}",
+                    use_container_width=True,
+                    disabled=is_done,
+                    on_click=fill_ats_shortcut,
+                    args=(index, "kasus terlalu banyak")
+                )
+
+            can_mark_done = (
+                normalize_cell(instruksi_val) != ''
+                and normalize_cell(output_val) != ''
+            )
+            if not is_done and not can_mark_done:
+                st.warning("Isi instruction_ats dan output_ats sebelum menandai tugas sebagai selesai.")
             
             # ROW 3: BUTTONS
             st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
@@ -707,7 +775,7 @@ if not working_df.empty:
                     key=f"done_{index}",
                     use_container_width=True,
                     type="primary",
-                    disabled=is_done
+                    disabled=is_done or not can_mark_done
                 ):
                     with st.spinner("💫 Menyelesaikan data..."):
                         expected_instruction = row.get('instruction_ats', '')
@@ -715,6 +783,9 @@ if not working_df.empty:
                         df.at[index, 'instruction_ats'] = instruksi_val
                         df.at[index, 'output_ats'] = output_val
                         df.at[index, 'validator'] = username
+                        if not can_mark_done:
+                            st.error("Tidak bisa menandai selesai: instruction_ats dan output_ats wajib diisi.")
+                            st.stop()
                         df.at[index, 'status'] = "Done"
                         if update_data(
                             df,

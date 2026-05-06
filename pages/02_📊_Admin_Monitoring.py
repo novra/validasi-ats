@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+from io import BytesIO
 from streamlit_gsheets import GSheetsConnection
 import plotly.graph_objects as go
 import plotly.express as px
@@ -44,7 +45,7 @@ def prepare_sheet_data(df):
     ordered_cols = SHEET_COLUMNS + [col for col in sheet_df.columns if col not in SHEET_COLUMNS]
     return sheet_df[ordered_cols]
 
-def merge_with_latest_sheet(df, changed_indices, changed_columns):
+def merge_with_latest_sheet(df, changed_indices, changed_columns, expected_values=None):
     latest_df = conn.read(worksheet="Sheet1", ttl=0)
     if latest_df is None or latest_df.empty:
         raise ValueError("Google Sheet terbaru kosong atau tidak dapat dibaca.")
@@ -66,6 +67,21 @@ def merge_with_latest_sheet(df, changed_indices, changed_columns):
         if index not in pending_data.index or index not in latest_data.index:
             raise ValueError(f"Baris {index + 1} tidak ditemukan saat sinkronisasi.")
 
+        if expected_values:
+            for col, allowed_values in expected_values.items():
+                if col not in latest_data.columns:
+                    latest_data[col] = ''
+                if isinstance(allowed_values, dict):
+                    allowed_values = allowed_values.get(index, '')
+                if not isinstance(allowed_values, (list, tuple, set)):
+                    allowed_values = [allowed_values]
+                latest_value = normalize_cell(latest_data.at[index, col])
+                allowed_values = {normalize_cell(value) for value in allowed_values}
+                if latest_value not in allowed_values:
+                    raise ValueError(
+                        f"Baris {index + 1} sudah berubah di Google Sheet. Muat ulang halaman sebelum melakukan replace."
+                    )
+
         for col in changed_columns:
             if col not in pending_data.columns:
                 raise ValueError(f"Kolom {col} tidak ditemukan saat sinkronisasi.")
@@ -75,11 +91,11 @@ def merge_with_latest_sheet(df, changed_indices, changed_columns):
 
     return latest_data
 
-def update_data(df, changed_indices=None, changed_columns=None):
+def update_data(df, changed_indices=None, changed_columns=None, expected_values=None):
     with get_sheet_write_lock():
-        return update_data_unlocked(df, changed_indices, changed_columns)
+        return update_data_unlocked(df, changed_indices, changed_columns, expected_values)
 
-def update_data_unlocked(df, changed_indices=None, changed_columns=None):
+def update_data_unlocked(df, changed_indices=None, changed_columns=None, expected_values=None):
     try:
         expected_rows = st.session_state.get('admin_loaded_sheet_rows')
         if df is None or df.empty:
@@ -90,7 +106,7 @@ def update_data_unlocked(df, changed_indices=None, changed_columns=None):
             st.error("Update dibatalkan: perubahan baris/kolom tidak diketahui.")
             return False
 
-        sheet_data = merge_with_latest_sheet(df, changed_indices, changed_columns)
+        sheet_data = merge_with_latest_sheet(df, changed_indices, changed_columns, expected_values)
         nonempty_input_rows = sheet_data['input'].fillna('').astype(str).str.strip().ne('').sum()
 
         if nonempty_input_rows < MIN_NONEMPTY_INPUT_ROWS:
@@ -210,6 +226,12 @@ def calculate_stats(df, username):
 # --- HITUNG STATISTIK GLOBAL ---
 visible_df = df[has_input_mask].copy()
 
+problem_pattern = r"\b(?:sama|serupa)\b|terlalu\s+banyak"
+problem_text_mask = (
+    visible_df['instruction_ats'].str.contains(problem_pattern, case=False, na=False, regex=True)
+    | visible_df['output_ats'].str.contains(problem_pattern, case=False, na=False, regex=True)
+)
+
 total_data = len(visible_df)
 unassigned_mask = (
     (visible_df['input'] != '')
@@ -222,6 +244,15 @@ total_done = len(visible_df[visible_df['status'] == 'Done'])
 total_pending = len(visible_df[(visible_df['validator'] != '') & (visible_df['status'] != 'Done') & (visible_df['status'] != '')])
 total_available = len(visible_df[(visible_df['validator'] != '') & (visible_df['status'] == '')])
 total_unassigned = len(visible_df[unassigned_mask])
+total_failed_labeled = len(visible_df[problem_text_mask])
+ready_ats_mask = (
+    (visible_df['status'] == 'Done')
+    & (visible_df['instruction_ats'] != '')
+    & (visible_df['output_ats'] != '')
+    & ~problem_text_mask
+)
+total_ready_ats = len(visible_df[ready_ats_mask])
+ready_ats_df = visible_df[ready_ats_mask].copy()
 
 # --- TAMPILKAN STATISTIK GLOBAL ---
 st.markdown("### 📈 Statistik Keseluruhan")
@@ -237,6 +268,12 @@ with col4:
     st.metric("📋 Diambil (Belum Dimulai)", total_available)
 with col5:
     st.metric("🆓 Tersedia Diambil", total_unassigned)
+
+col6, col7 = st.columns(2)
+with col6:
+    st.metric("Gagal Dilabeli", total_failed_labeled)
+with col7:
+    st.metric("ATS Siap Pakai", total_ready_ats)
 
 st.divider()
 
@@ -447,22 +484,26 @@ if show_cols:
     
     st.info(f"Total: {len(filtered_df)} data")
 
-# --- REPLACE INPUT BERDASARKAN OUTPUT BERMASALAH ---
+# --- REPLACE INPUT BERDASARKAN LABEL BERMASALAH ---
 st.divider()
-st.markdown("### Replace Input Berdasarkan Output Bermasalah")
+st.markdown("### Replace Input Berdasarkan Label Bermasalah")
 
-problem_keywords = ["serupa", "terlalu banyak"]
-problem_pattern = "|".join(problem_keywords)
-problem_mask = has_input_mask & df['output_ats'].str.contains(problem_pattern, case=False, na=False)
+problem_mask = (
+    has_input_mask
+    & (
+        df['instruction_ats'].str.contains(problem_pattern, case=False, na=False, regex=True)
+        | df['output_ats'].str.contains(problem_pattern, case=False, na=False, regex=True)
+    )
+)
 problem_df = df[problem_mask].copy()
 
-st.caption("Filter otomatis mencari data dengan output_ats yang mengandung kata: serupa atau terlalu banyak.")
+st.caption("Filter otomatis mencari data dengan instruction_ats atau output_ats yang mengandung kata: sama, serupa, atau terlalu banyak.")
 st.metric("Data terfilter", len(problem_df))
 
 if problem_df.empty:
-    st.info("Tidak ada data dengan output_ats yang mengandung kata 'serupa' atau 'terlalu banyak'.")
+    st.info("Tidak ada data dengan instruction_ats atau output_ats yang mengandung kata 'sama', 'serupa', atau 'terlalu banyak'.")
 else:
-    preview_cols = ['validator', 'status', 'input', 'output_ats']
+    preview_cols = ['validator', 'status', 'input', 'instruction_ats', 'output_ats']
     preview_df = problem_df[preview_cols].copy()
     preview_df.insert(0, 'row_sheet', preview_df.index + 1)
 
@@ -473,7 +514,7 @@ else:
     )
 
     row_options = {
-        f"Row {index + 1} - {str(row.get('output_ats', ''))[:80]}": index
+        f"Row {index + 1} - {str(row.get('instruction_ats', '') or row.get('output_ats', ''))[:80]}": index
         for index, row in problem_df.iterrows()
     }
 
@@ -500,11 +541,38 @@ else:
         elif not confirm_replace:
             st.error("Centang konfirmasi sebelum melakukan replace.")
         else:
+            expected_replace_values = {
+                'input': {
+                    index: df.at[index, 'input']
+                    for index in selected_indices
+                },
+                'instruction_ats': {
+                    index: df.at[index, 'instruction_ats']
+                    for index in selected_indices
+                },
+                'output_ats': {
+                    index: df.at[index, 'output_ats']
+                    for index in selected_indices
+                },
+                'status': {
+                    index: df.at[index, 'status']
+                    for index in selected_indices
+                },
+                'validator': {
+                    index: df.at[index, 'validator']
+                    for index in selected_indices
+                },
+            }
             df.loc[selected_indices, 'input'] = replacement_input.strip()
             df.loc[selected_indices, ['instruction_ats', 'output_ats']] = ''
             df.loc[selected_indices, 'status'] = 'Pending'
 
-            if update_data(df, selected_indices, ['input', 'instruction_ats', 'output_ats', 'status']):
+            if update_data(
+                df,
+                selected_indices,
+                ['input', 'instruction_ats', 'output_ats', 'status'],
+                expected_values=expected_replace_values
+            ):
                 st.success(f"Berhasil mengganti input untuk {len(selected_indices)} baris.")
                 st.rerun()
 
@@ -534,6 +602,45 @@ with col_export2:
         mime="text/csv",
         use_container_width=True
     )
+
+st.markdown("#### Export ATS Siap Pakai")
+st.caption("Berisi data status Done dengan instruction_ats dan output_ats terisi, tanpa kata bermasalah.")
+
+ready_export_df = ready_ats_df.copy()
+ready_export_df.insert(0, 'row_sheet', ready_export_df.index + 1)
+
+col_ready_csv, col_ready_excel = st.columns(2)
+
+with col_ready_csv:
+    ready_csv = ready_export_df.to_csv(index=False)
+    st.download_button(
+        label="Download ATS Siap Pakai CSV",
+        data=ready_csv,
+        file_name="ats_siap_pakai.csv",
+        mime="text/csv",
+        use_container_width=True,
+        disabled=ready_export_df.empty
+    )
+
+with col_ready_excel:
+    excel_buffer = BytesIO()
+    excel_ready = True
+    try:
+        with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+            ready_export_df.to_excel(writer, index=False, sheet_name="ATS Siap Pakai")
+    except Exception:
+        excel_ready = False
+
+    st.download_button(
+        label="Download ATS Siap Pakai Excel",
+        data=excel_buffer.getvalue() if excel_ready else b"",
+        file_name="ats_siap_pakai.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        disabled=ready_export_df.empty or not excel_ready
+    )
+    if not excel_ready:
+        st.caption("Export Excel belum tersedia karena dependency Excel tidak aktif. Gunakan CSV.")
 
 st.divider()
 st.caption("🔒 Admin Monitoring Panel - Akses Terbatas")
