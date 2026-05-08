@@ -4,6 +4,7 @@ from io import BytesIO
 from streamlit_gsheets import GSheetsConnection
 import plotly.graph_objects as go
 import plotly.express as px
+import time
 from auth_config import AUTHORIZED_USERS, ADMIN_CREDENTIALS, AUTHORIZED_ADMINS, REPLACEMENT_ADMINS
 from sheet_lock import get_sheet_write_lock
 
@@ -29,8 +30,50 @@ def normalize_cell(value):
         return ''
     return text
 
+def remember_loaded_sheet(df):
+    if df is not None and not df.empty:
+        st.session_state['admin_last_good_sheet_df'] = df.copy()
+        st.session_state['admin_last_good_sheet_at'] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+def read_sheet_with_retry(attempts=3, delay_seconds=0.5):
+    last_error = None
+    last_df = None
+
+    for _ in range(attempts):
+        try:
+            last_df = conn.read(worksheet="Sheet1", ttl=0)
+            if last_df is not None and not last_df.empty:
+                return last_df, None
+        except Exception as e:
+            last_error = e
+        time.sleep(delay_seconds)
+
+    return last_df, last_error
+
 def load_data():
-    return conn.read(worksheet="Sheet1", ttl=0)
+    last_df, last_error = read_sheet_with_retry()
+    if last_df is not None and not last_df.empty:
+        remember_loaded_sheet(last_df)
+        return last_df
+
+    cached_df = st.session_state.get('admin_last_good_sheet_df')
+    if cached_df is not None and not cached_df.empty:
+        cached_at = st.session_state.get('admin_last_good_sheet_at', 'sebelumnya')
+        if last_error:
+            st.warning(
+                f"Google Sheet sedang tidak dapat dibaca ({last_error}). "
+                f"Menampilkan data terakhir yang berhasil dimuat pada {cached_at}."
+            )
+        else:
+            st.warning(
+                "Google Sheet terbaca kosong sesaat. "
+                f"Menampilkan data terakhir yang berhasil dimuat pada {cached_at}."
+            )
+        return cached_df.copy()
+
+    if last_error:
+        st.error(f"Error membaca Google Sheet: {last_error}")
+    return last_df
 
 def prepare_sheet_data(df):
     sheet_df = df.copy()
@@ -163,9 +206,21 @@ def replace_problem_inputs(selected_indices, replacement_input, expected_values)
     try:
         with get_sheet_write_lock():
             expected_rows = st.session_state.get('admin_loaded_sheet_rows')
-            latest_df = conn.read(worksheet="Sheet1", ttl=0)
+            latest_df, latest_error = read_sheet_with_retry()
             if latest_df is None or latest_df.empty:
-                st.error("Replace dibatalkan: Google Sheet terbaru kosong atau tidak dapat dibaca.")
+                if latest_error:
+                    st.error(f"Replace dibatalkan: Google Sheet terbaru tidak dapat dibaca ({latest_error}).")
+                else:
+                    st.error("Replace dibatalkan: Google Sheet terbaru kosong atau tidak dapat dibaca.")
+                return False
+
+            normalized_replacement_input = replacement_input.strip()
+            replacement_input_length = len(normalize_cell(normalized_replacement_input))
+            if replacement_input_length > MAX_SHEET_CELL_CHARS:
+                st.error(
+                    f"Replace dibatalkan: input baru berisi {replacement_input_length:,} karakter. "
+                    f"Batas maksimal Google Sheets adalah {MAX_SHEET_CELL_CHARS:,} karakter per cell."
+                )
                 return False
 
             latest_data = prepare_sheet_data(latest_df)
@@ -200,7 +255,7 @@ def replace_problem_inputs(selected_indices, replacement_input, expected_values)
                     )
                     return False
 
-            latest_data.loc[selected_indices, 'input'] = replacement_input.strip()
+            latest_data.loc[selected_indices, 'input'] = normalized_replacement_input
             latest_data.loc[selected_indices, ['instruction_ats', 'output_ats']] = ''
             latest_data.loc[selected_indices, 'status'] = 'Pending'
 
@@ -218,12 +273,34 @@ def replace_problem_inputs(selected_indices, replacement_input, expected_values)
 
             conn.update(worksheet="Sheet1", data=latest_data)
             st.session_state['admin_loaded_sheet_rows'] = len(latest_data)
+            remember_loaded_sheet(latest_data)
 
-            verified_df = conn.read(worksheet="Sheet1", ttl=0)
+            verified_df, verified_error = read_sheet_with_retry()
+            if verified_df is None or verified_df.empty:
+                if verified_error:
+                    st.warning(
+                        f"Replace tersimpan, tetapi verifikasi Google Sheet belum dapat dibaca ({verified_error}). "
+                        "Dashboard akan memakai data terbaru dari proses replace."
+                    )
+                else:
+                    st.warning(
+                        "Replace tersimpan, tetapi verifikasi Google Sheet terbaca kosong. "
+                        "Dashboard akan memakai data terbaru dari proses replace."
+                    )
+                return True
+
             verified_data = prepare_sheet_data(verified_df)
+            remember_loaded_sheet(verified_data)
             for index in selected_indices:
+                if index not in verified_data.index:
+                    st.warning(
+                        f"Replace terkirim, tetapi baris {index + 1} tidak ditemukan saat verifikasi. "
+                        "Muat ulang halaman untuk melihat data terbaru."
+                    )
+                    return False
+
                 if (
-                    normalize_cell(verified_data.at[index, 'input']) != replacement_input.strip()
+                    normalize_cell(verified_data.at[index, 'input']) != normalized_replacement_input
                     or normalize_cell(verified_data.at[index, 'instruction_ats']) != ''
                     or normalize_cell(verified_data.at[index, 'output_ats']) != ''
                     or normalize_cell(verified_data.at[index, 'status']) != 'Pending'
