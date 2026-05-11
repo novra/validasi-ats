@@ -246,14 +246,16 @@ def claim_tasks(df, username, batch_size):
 def build_generation_prompt(source_text):
     return (
         "Anda adalah asisten penulisan data klinis berbahasa Indonesia.\n"
-        "Tugas: ubah data rekam medis mentah berikut menjadi narasi kasus yang utuh, alami, dan mudah dibaca.\n\n"
+        "Tugas: ubah data rekam medis mentah berikut menjadi narasi kasus yang utuh, lengkap, alami, dan mudah dibaca.\n\n"
         "Aturan wajib:\n"
         f"- Hapus seluruh teks pembatas `{DELIMITER_TEXT}`.\n"
-        "- Ubah format SOAP, bullet, tabel, simbol, singkatan umum, dan potongan frasa menjadi kalimat naratif.\n"
-        "- Pertahankan informasi medis penting seperti keluhan, riwayat, temuan pemeriksaan, diagnosis/asesmen, tindakan, terapi, dan rencana.\n"
+        "- Ubah format SOAP, bullet, tabel, simbol, singkatan umum, dan potongan frasa menjadi kalimat naratif yang mengalir.\n"
+        "- Jangan meringkas secara berlebihan. Masukkan seluruh informasi medis penting yang tersedia.\n"
+        "- Pertahankan detail keluhan, onset/durasi, riwayat, faktor risiko, pemeriksaan fisik, tanda vital, pemeriksaan penunjang, diagnosis/asesmen, tindakan, terapi, edukasi, dan rencana kontrol bila tersedia.\n"
+        "- Jika ada beberapa bagian yang dipisahkan pembatas, gabungkan semuanya menjadi alur kasus yang runtut, bukan memilih salah satu bagian saja.\n"
         "- Jangan menambahkan fakta baru yang tidak ada pada data sumber.\n"
         "- Jika ada bagian yang tidak jelas, tulis secara netral tanpa mengarang.\n"
-        "- Gunakan bahasa Indonesia klinis yang rapi dalam satu paragraf narasi atau beberapa kalimat pendek.\n"
+        "- Gunakan bahasa Indonesia klinis yang rapi. Boleh memakai beberapa paragraf agar informasi tidak hilang.\n"
         "- Jangan menulis ulang label SOAP sebagai daftar.\n\n"
         f"Data sumber:\n{source_text}\n\nNarasi kasus:"
     )
@@ -315,11 +317,13 @@ def call_huggingface_model(model_id, source_text, temperature, max_new_tokens, f
             raise
 
         choices = result.get("choices", []) if isinstance(result, dict) else []
-        message = choices[0].get("message", {}) if choices else {}
+        first_choice = choices[0] if choices else {}
+        message = first_choice.get("message", {})
         generated_text = normalize_cell(message.get("content", ""))
+        finish_reason = normalize_cell(first_choice.get("finish_reason", ""))
 
         if generated_text:
-            return generated_text, current_model_id
+            return generated_text, current_model_id, finish_reason
         errors.append(f"{current_model_id}: respons kosong")
 
     raise ValueError(
@@ -331,7 +335,12 @@ def call_huggingface_model(model_id, source_text, temperature, max_new_tokens, f
 
 def clean_narrative(text):
     narrative = normalize_cell(text).replace(DELIMITER_TEXT, " ")
-    return " ".join(narrative.split())
+    paragraphs = [
+        " ".join(paragraph.split())
+        for paragraph in narrative.splitlines()
+        if paragraph.strip()
+    ]
+    return "\n\n".join(paragraphs)
 
 
 if not st.session_state.get("replacement_logged_in", False):
@@ -422,7 +431,7 @@ with st.sidebar.expander("Pengaturan Model", expanded=True):
     custom_model = st.text_input("Custom model id:", placeholder="contoh: Qwen/Qwen2.5-7B-Instruct-1M")
     selected_model = custom_model.strip() if model_choice == "Custom model" and custom_model.strip() else model_choice
     temperature = st.slider("Temperature", min_value=0.1, max_value=1.5, value=0.7, step=0.1)
-    max_new_tokens = st.slider("Max new tokens", min_value=32, max_value=512, value=320, step=16)
+    max_new_tokens = st.slider("Max output tokens", min_value=256, max_value=4096, value=1536, step=128)
 
 if not get_secret_value("HUGGINGFACE_API_KEY", "HUGGINGFACE_API_TOKEN", "HF_TOKEN"):
     st.warning(
@@ -452,6 +461,7 @@ for index, row in my_active_df.iterrows():
     generated_key = f"replacement_generated_{index}"
     editor_key = f"replacement_editor_{index}"
     pending_editor_key = f"replacement_editor_pending_{index}"
+    notice_key = f"replacement_notice_{index}"
 
     if editor_key not in st.session_state:
         st.session_state[editor_key] = normalize_cell(row.get("replacement_narrative"))
@@ -468,6 +478,8 @@ for index, row in my_active_df.iterrows():
         """,
         unsafe_allow_html=True,
     )
+    if notice_key in st.session_state:
+        st.warning(st.session_state.pop(notice_key))
 
     col_source, col_editor = st.columns(2, gap="large")
     with col_source:
@@ -490,7 +502,7 @@ for index, row in my_active_df.iterrows():
         if st.button("Generate Narasi", key=f"generate_{index}", type="primary", use_container_width=True):
             with st.spinner(f"Memanggil model {selected_model}..."):
                 try:
-                    generated_text, used_model = call_huggingface_model(
+                    generated_text, used_model, finish_reason = call_huggingface_model(
                         selected_model,
                         original_input,
                         temperature,
@@ -504,6 +516,11 @@ for index, row in my_active_df.iterrows():
                         st.session_state[generated_key] = cleaned_text
                         st.session_state[pending_editor_key] = cleaned_text
                         st.session_state[f"replacement_used_model_{index}"] = used_model
+                        if finish_reason == "length":
+                            st.session_state[notice_key] = (
+                                "Narasi kemungkinan masih terpotong karena mencapai batas output token. "
+                                "Naikkan Max output tokens lalu generate ulang."
+                            )
                         st.success(
                             f"Narasi berhasil dibuat dengan model {used_model}. "
                             "Anda bisa generate ulang atau edit sebelum simpan."
