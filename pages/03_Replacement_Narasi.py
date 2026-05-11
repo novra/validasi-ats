@@ -29,13 +29,12 @@ REPLACEMENT_COLUMNS = [
     "replacement_saved_at",
 ]
 DEFAULT_MODELS = [
-    "Qwen/Qwen2.5-3B-Instruct",
-    "Qwen/Qwen2.5-1.5B-Instruct",
-    "Qwen/Qwen2.5-0.5B-Instruct",
-    "CohereLabs/aya-expanse-8b",
-    "bigscience/mt0-large",
-    "google/flan-t5-large",
-    "google/flan-t5-base",
+    "Qwen/Qwen2.5-7B-Instruct-1M",
+    "Qwen/Qwen3-4B-Thinking-2507",
+    "google/gemma-2-2b-it",
+    "meta-llama/Llama-3.1-8B-Instruct:cerebras",
+    "openai/gpt-oss-120b:cerebras",
+    "deepseek-ai/DeepSeek-V3-0324",
 ]
 
 
@@ -265,26 +264,32 @@ def call_huggingface_model(model_id, source_text, temperature, max_new_tokens, f
     headers = {}
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    headers["Content-Type"] = "application/json"
 
-    payload = {
-        "inputs": build_generation_prompt(source_text),
-        "parameters": {
-            "max_new_tokens": int(max_new_tokens),
-            "temperature": float(temperature),
-            "return_full_text": False,
-        },
-        "options": {"wait_for_model": True},
-    }
     model_ids = [model_id]
     for fallback_model_id in fallback_model_ids or []:
         if fallback_model_id not in model_ids:
             model_ids.append(fallback_model_id)
 
+    prompt = build_generation_prompt(source_text)
     errors = []
     for current_model_id in model_ids:
+        payload = {
+            "model": current_model_id,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Anda menulis ulang data medis mentah menjadi narasi klinis bahasa Indonesia.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            "max_tokens": int(max_new_tokens),
+            "temperature": float(temperature),
+        }
+
         try:
             response = requests.post(
-                f"https://api-inference.huggingface.co/models/{current_model_id}",
+                "https://router.huggingface.co/v1/chat/completions",
                 headers=headers,
                 json=payload,
                 timeout=120,
@@ -293,38 +298,33 @@ def call_huggingface_model(model_id, source_text, temperature, max_new_tokens, f
             result = response.json()
         except requests.HTTPError as e:
             status_code = e.response.status_code if e.response is not None else ""
-            errors.append(f"{current_model_id}: HTTP {status_code}")
-            if status_code in {403, 404, 503}:
+            error_detail = ""
+            if e.response is not None:
+                try:
+                    error_body = e.response.json()
+                    error_value = error_body.get("error", "")
+                    if isinstance(error_value, dict):
+                        error_detail = error_value.get("message", "")
+                    else:
+                        error_detail = str(error_value)
+                except Exception:
+                    error_detail = e.response.text[:200]
+            errors.append(f"{current_model_id}: HTTP {status_code} {error_detail}".strip())
+            if status_code in {400, 402, 403, 404, 429, 503}:
                 continue
             raise
 
-        if isinstance(result, list) and result:
-            first = result[0]
-            generated_text = normalize_cell(
-                first.get("generated_text")
-                or first.get("summary_text")
-                or first.get("translation_text")
-                or str(first)
-            )
-        elif isinstance(result, dict):
-            if "error" in result:
-                errors.append(f"{current_model_id}: {result['error']}")
-                continue
-            generated_text = normalize_cell(
-                result.get("generated_text")
-                or result.get("summary_text")
-                or result.get("translation_text")
-                or str(result)
-            )
-        else:
-            generated_text = normalize_cell(str(result))
+        choices = result.get("choices", []) if isinstance(result, dict) else []
+        message = choices[0].get("message", {}) if choices else {}
+        generated_text = normalize_cell(message.get("content", ""))
 
         if generated_text:
             return generated_text, current_model_id
         errors.append(f"{current_model_id}: respons kosong")
 
     raise ValueError(
-        "Semua model yang dicoba gagal atau tidak tersedia melalui Hugging Face Inference API. "
+        "Semua model yang dicoba gagal melalui Hugging Face Inference Providers. "
+        "Pastikan token memiliki permission Inference Providers dan billing/free-tier aktif. "
         + "; ".join(errors)
     )
 
@@ -419,7 +419,7 @@ st.sidebar.metric("Total Replacement Done", all_done_count)
 
 with st.sidebar.expander("Pengaturan Model", expanded=True):
     model_choice = st.selectbox("Model Hugging Face:", DEFAULT_MODELS + ["Custom model"], index=0)
-    custom_model = st.text_input("Custom model id:", placeholder="contoh: google/flan-t5-base")
+    custom_model = st.text_input("Custom model id:", placeholder="contoh: Qwen/Qwen2.5-7B-Instruct-1M")
     selected_model = custom_model.strip() if model_choice == "Custom model" and custom_model.strip() else model_choice
     temperature = st.slider("Temperature", min_value=0.1, max_value=1.5, value=0.7, step=0.1)
     max_new_tokens = st.slider("Max new tokens", min_value=32, max_value=512, value=320, step=16)
