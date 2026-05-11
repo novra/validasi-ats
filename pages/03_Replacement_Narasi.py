@@ -42,6 +42,9 @@ st.markdown(
     """
 <style>
     .source-box {
+        min-height: 520px;
+        max-height: 760px;
+        overflow-y: auto;
         background: #f8fafc;
         border: 1px solid #cbd5e1;
         border-radius: 8px;
@@ -491,7 +494,7 @@ for index, row in my_active_df.iterrows():
         narrative_value = st.text_area(
             "Narasi Replacement",
             key=editor_key,
-            height=260,
+            height=560,
             max_chars=MAX_SHEET_CELL_CHARS,
             label_visibility="collapsed",
             placeholder="Generate dari Hugging Face atau tulis narasi final di sini...",
