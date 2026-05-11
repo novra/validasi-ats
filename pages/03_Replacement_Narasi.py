@@ -451,9 +451,12 @@ for index, row in my_active_df.iterrows():
     original_input = normalize_cell(row.get("replacement_original_input")) or normalize_cell(row.get("input"))
     generated_key = f"replacement_generated_{index}"
     editor_key = f"replacement_editor_{index}"
+    pending_editor_key = f"replacement_editor_pending_{index}"
 
     if editor_key not in st.session_state:
         st.session_state[editor_key] = normalize_cell(row.get("replacement_narrative"))
+    if pending_editor_key in st.session_state:
+        st.session_state[editor_key] = st.session_state.pop(pending_editor_key)
 
     escaped_original_input = escape(original_input)
 
@@ -499,7 +502,7 @@ for index, row in my_active_df.iterrows():
                         st.error("Model tidak mengembalikan narasi. Coba generate ulang atau pilih model lain.")
                     else:
                         st.session_state[generated_key] = cleaned_text
-                        st.session_state[editor_key] = cleaned_text
+                        st.session_state[pending_editor_key] = cleaned_text
                         st.session_state[f"replacement_used_model_{index}"] = used_model
                         st.success(
                             f"Narasi berhasil dibuat dengan model {used_model}. "
@@ -511,7 +514,7 @@ for index, row in my_active_df.iterrows():
 
     with col_copy:
         if st.button("Bersihkan Pembatas", key=f"clean_{index}", use_container_width=True):
-            st.session_state[editor_key] = clean_narrative(narrative_value)
+            st.session_state[pending_editor_key] = clean_narrative(narrative_value)
             st.rerun()
 
     with col_save:
