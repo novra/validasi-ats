@@ -29,12 +29,13 @@ REPLACEMENT_COLUMNS = [
     "replacement_saved_at",
 ]
 DEFAULT_MODELS = [
-    "aisingapore/Apertus-SEA-LION-v4-8B-IT",
-    "aisingapore/Llama-SEA-LION-v3-8B-IT",
-    "Qwen/Qwen2.5-7B-Instruct",
     "Qwen/Qwen2.5-3B-Instruct",
+    "Qwen/Qwen2.5-1.5B-Instruct",
+    "Qwen/Qwen2.5-0.5B-Instruct",
     "CohereLabs/aya-expanse-8b",
-    "google/gemma-2-9b-it",
+    "bigscience/mt0-large",
+    "google/flan-t5-large",
+    "google/flan-t5-base",
 ]
 
 
@@ -259,7 +260,7 @@ def build_generation_prompt(source_text):
     )
 
 
-def call_huggingface_model(model_id, source_text, temperature, max_new_tokens):
+def call_huggingface_model(model_id, source_text, temperature, max_new_tokens, fallback_model_ids=None):
     token = get_secret_value("HUGGINGFACE_API_KEY", "HUGGINGFACE_API_TOKEN", "HF_TOKEN")
     headers = {}
     if token:
@@ -274,33 +275,58 @@ def call_huggingface_model(model_id, source_text, temperature, max_new_tokens):
         },
         "options": {"wait_for_model": True},
     }
-    response = requests.post(
-        f"https://api-inference.huggingface.co/models/{model_id}",
-        headers=headers,
-        json=payload,
-        timeout=120,
-    )
-    response.raise_for_status()
-    result = response.json()
+    model_ids = [model_id]
+    for fallback_model_id in fallback_model_ids or []:
+        if fallback_model_id not in model_ids:
+            model_ids.append(fallback_model_id)
 
-    if isinstance(result, list) and result:
-        first = result[0]
-        return normalize_cell(
-            first.get("generated_text")
-            or first.get("summary_text")
-            or first.get("translation_text")
-            or str(first)
-        )
-    if isinstance(result, dict):
-        if "error" in result:
-            raise ValueError(result["error"])
-        return normalize_cell(
-            result.get("generated_text")
-            or result.get("summary_text")
-            or result.get("translation_text")
-            or str(result)
-        )
-    return normalize_cell(str(result))
+    errors = []
+    for current_model_id in model_ids:
+        try:
+            response = requests.post(
+                f"https://api-inference.huggingface.co/models/{current_model_id}",
+                headers=headers,
+                json=payload,
+                timeout=120,
+            )
+            response.raise_for_status()
+            result = response.json()
+        except requests.HTTPError as e:
+            status_code = e.response.status_code if e.response is not None else ""
+            errors.append(f"{current_model_id}: HTTP {status_code}")
+            if status_code in {403, 404, 503}:
+                continue
+            raise
+
+        if isinstance(result, list) and result:
+            first = result[0]
+            generated_text = normalize_cell(
+                first.get("generated_text")
+                or first.get("summary_text")
+                or first.get("translation_text")
+                or str(first)
+            )
+        elif isinstance(result, dict):
+            if "error" in result:
+                errors.append(f"{current_model_id}: {result['error']}")
+                continue
+            generated_text = normalize_cell(
+                result.get("generated_text")
+                or result.get("summary_text")
+                or result.get("translation_text")
+                or str(result)
+            )
+        else:
+            generated_text = normalize_cell(str(result))
+
+        if generated_text:
+            return generated_text, current_model_id
+        errors.append(f"{current_model_id}: respons kosong")
+
+    raise ValueError(
+        "Semua model yang dicoba gagal atau tidak tersedia melalui Hugging Face Inference API. "
+        + "; ".join(errors)
+    )
 
 
 def clean_narrative(text):
@@ -461,11 +487,12 @@ for index, row in my_active_df.iterrows():
         if st.button("Generate Narasi", key=f"generate_{index}", type="primary", use_container_width=True):
             with st.spinner(f"Memanggil model {selected_model}..."):
                 try:
-                    generated_text = call_huggingface_model(
+                    generated_text, used_model = call_huggingface_model(
                         selected_model,
                         original_input,
                         temperature,
                         max_new_tokens,
+                        DEFAULT_MODELS,
                     )
                     cleaned_text = clean_narrative(generated_text)
                     if not cleaned_text:
@@ -473,7 +500,11 @@ for index, row in my_active_df.iterrows():
                     else:
                         st.session_state[generated_key] = cleaned_text
                         st.session_state[editor_key] = cleaned_text
-                        st.success("Narasi berhasil dibuat. Anda bisa generate ulang atau edit sebelum simpan.")
+                        st.session_state[f"replacement_used_model_{index}"] = used_model
+                        st.success(
+                            f"Narasi berhasil dibuat dengan model {used_model}. "
+                            "Anda bisa generate ulang atau edit sebelum simpan."
+                        )
                         st.rerun()
                 except Exception as e:
                     st.error(f"Gagal generate narasi: {e}")
@@ -503,7 +534,10 @@ for index, row in my_active_df.iterrows():
                 df.at[index, "input"] = final_narrative
                 df.at[index, "replacement_user"] = username
                 df.at[index, "replacement_status"] = "Done"
-                df.at[index, "replacement_model"] = selected_model
+                df.at[index, "replacement_model"] = st.session_state.get(
+                    f"replacement_used_model_{index}",
+                    selected_model,
+                )
                 df.at[index, "replacement_original_input"] = original_input
                 df.at[index, "replacement_narrative"] = final_narrative
                 df.at[index, "replacement_saved_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
