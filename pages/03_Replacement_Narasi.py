@@ -87,6 +87,22 @@ def get_secret_value(*keys):
             return huggingface.get("api_token") or huggingface.get("token")
     except Exception:
         pass
+
+    def find_nested_secret(container):
+        if not hasattr(container, "items"):
+            return ""
+        for nested_key, nested_value in container.items():
+            if nested_key in keys and nested_value:
+                return nested_value
+            found_value = find_nested_secret(nested_value)
+            if found_value:
+                return found_value
+        return ""
+
+    try:
+        return find_nested_secret(st.secrets)
+    except Exception:
+        pass
     return ""
 
 
