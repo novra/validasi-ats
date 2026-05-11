@@ -1,0 +1,524 @@
+import time
+from html import escape
+from datetime import datetime
+
+import pandas as pd
+import requests
+import streamlit as st
+from streamlit_gsheets import GSheetsConnection
+
+from auth_config import AUTHORIZED_REPLACEMENT_USERS, REPLACEMENT_USER_CREDENTIALS
+from sheet_lock import get_sheet_write_lock
+
+
+st.set_page_config(layout="wide", page_title="Replacement Narasi")
+
+conn = st.connection("gsheets", type=GSheetsConnection)
+
+DELIMITER_TEXT = "----- INI PEMBATAS SAJA -----"
+WORKSHEET_NAME = "Sheet1"
+MAX_SHEET_CELL_CHARS = 50000
+BASE_COLUMNS = ["instruction_ats", "input", "output_ats", "validator", "status"]
+PROTECTED_LABELING_COLUMNS = {"instruction_ats", "output_ats", "validator", "status"}
+REPLACEMENT_COLUMNS = [
+    "replacement_user",
+    "replacement_status",
+    "replacement_model",
+    "replacement_original_input",
+    "replacement_narrative",
+    "replacement_saved_at",
+]
+DEFAULT_MODELS = [
+    "aisingapore/Apertus-SEA-LION-v4-8B-IT",
+    "aisingapore/Llama-SEA-LION-v3-8B-IT",
+    "Qwen/Qwen2.5-7B-Instruct",
+    "Qwen/Qwen2.5-3B-Instruct",
+    "CohereLabs/aya-expanse-8b",
+    "google/gemma-2-9b-it",
+]
+
+
+st.markdown(
+    """
+<style>
+    .source-box {
+        background: #f8fafc;
+        border: 1px solid #cbd5e1;
+        border-radius: 8px;
+        padding: 16px;
+        white-space: pre-wrap;
+        line-height: 1.7;
+        color: #1f2937;
+    }
+    .task-header {
+        background: #ecfeff;
+        border-left: 5px solid #0891b2;
+        border-radius: 8px;
+        padding: 12px 14px;
+        margin: 18px 0 12px 0;
+    }
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+
+def normalize_cell(value):
+    if pd.isna(value):
+        return ""
+
+    text = str(value).strip()
+    if text.lower() in {"nan", "none", "<na>"}:
+        return ""
+    return text
+
+
+def get_secret_value(*keys):
+    for key in keys:
+        try:
+            value = st.secrets.get(key)
+            if value:
+                return value
+        except Exception:
+            pass
+    try:
+        huggingface = st.secrets.get("huggingface", {})
+        if hasattr(huggingface, "get"):
+            return huggingface.get("api_token") or huggingface.get("token")
+    except Exception:
+        pass
+    return ""
+
+
+def prepare_sheet_data(df):
+    sheet_df = df.copy()
+
+    if "instruction_ats" not in sheet_df.columns and "instruksi_ats" in sheet_df.columns:
+        sheet_df = sheet_df.rename(columns={"instruksi_ats": "instruction_ats"})
+    if "validator" not in sheet_df.columns and "nama_validator" in sheet_df.columns:
+        sheet_df = sheet_df.rename(columns={"nama_validator": "validator"})
+
+    for col in BASE_COLUMNS + REPLACEMENT_COLUMNS:
+        if col not in sheet_df.columns:
+            sheet_df[col] = ""
+        sheet_df[col] = sheet_df[col].map(normalize_cell)
+
+    legacy_cols = ["instruksi_ats", "nama_validator"]
+    sheet_df = sheet_df.drop(columns=[col for col in legacy_cols if col in sheet_df.columns])
+
+    ordered_cols = (
+        BASE_COLUMNS
+        + REPLACEMENT_COLUMNS
+        + [col for col in sheet_df.columns if col not in BASE_COLUMNS + REPLACEMENT_COLUMNS]
+    )
+    return sheet_df[ordered_cols]
+
+
+@st.cache_data(ttl=0)
+def load_data():
+    last_error = None
+    for _ in range(3):
+        try:
+            df = conn.read(worksheet=WORKSHEET_NAME, ttl=0)
+            if df is not None and not df.empty:
+                return df
+        except Exception as e:
+            last_error = e
+        time.sleep(0.5)
+
+    if last_error:
+        st.error(f"Gagal membaca Google Sheet: {last_error}")
+    return None
+
+
+def unclaimed_pool_mask(df):
+    return (
+        (df["input"].str.contains(DELIMITER_TEXT, case=False, na=False, regex=False))
+        & (df["status"] == "Done")
+        & (df["replacement_status"] != "Done")
+        & (df["replacement_user"] == "")
+    )
+
+
+def merge_update_rows(pending_df, changed_indices, changed_columns, expected_values=None):
+    latest_df = conn.read(worksheet=WORKSHEET_NAME, ttl=0)
+    if latest_df is None or latest_df.empty:
+        raise ValueError("Google Sheet terbaru kosong atau tidak dapat dibaca.")
+
+    latest_data = prepare_sheet_data(latest_df)
+    pending_data = prepare_sheet_data(pending_df)
+
+    if len(latest_data) < len(pending_data):
+        raise ValueError(
+            f"Jumlah baris Google Sheet terbaru ({len(latest_data)}) lebih sedikit dari data lokal ({len(pending_data)})."
+        )
+
+    for index in changed_indices:
+        if index not in latest_data.index or index not in pending_data.index:
+            raise ValueError(f"Baris {index + 1} tidak ditemukan saat sinkronisasi.")
+
+        if expected_values:
+            for col, expected_by_row in expected_values.items():
+                if col not in latest_data.columns:
+                    latest_data[col] = ""
+                expected_value = expected_by_row.get(index, "") if isinstance(expected_by_row, dict) else expected_by_row
+                if normalize_cell(latest_data.at[index, col]) != normalize_cell(expected_value):
+                    raise ValueError(
+                        f"Baris {index + 1} sudah berubah di Google Sheet. Muat ulang halaman sebelum menyimpan."
+                    )
+
+        for col in changed_columns:
+            if col not in latest_data.columns:
+                latest_data[col] = ""
+            latest_data.at[index, col] = pending_data.at[index, col]
+
+    return latest_data
+
+
+def update_rows(df, changed_indices, changed_columns, expected_values=None):
+    try:
+        protected_changes = PROTECTED_LABELING_COLUMNS.intersection(changed_columns)
+        if protected_changes:
+            protected_list = ", ".join(sorted(protected_changes))
+            st.error(f"Penyimpanan replacement dibatalkan: kolom labeling tidak boleh diubah ({protected_list}).")
+            return False
+
+        with get_sheet_write_lock():
+            sheet_data = merge_update_rows(df, changed_indices, changed_columns, expected_values)
+            conn.update(worksheet=WORKSHEET_NAME, data=sheet_data)
+            load_data.clear()
+            st.cache_data.clear()
+            return True
+    except Exception as e:
+        st.error(f"Gagal menyimpan ke Google Sheet: {e}")
+        return False
+
+
+def claim_tasks(df, username, batch_size):
+    with get_sheet_write_lock():
+        latest_df = conn.read(worksheet=WORKSHEET_NAME, ttl=0)
+        if latest_df is None or latest_df.empty:
+            st.error("Tidak dapat mengambil tugas: Google Sheet kosong atau tidak dapat dibaca.")
+            return 0
+
+        latest_data = prepare_sheet_data(latest_df)
+        available_indices = latest_data[unclaimed_pool_mask(latest_data)].head(batch_size).index.tolist()
+        if not available_indices:
+            st.info("Tidak ada data replacement baru yang bisa diambil.")
+            return 0
+
+        expected_values = {
+            "input": {index: latest_data.at[index, "input"] for index in available_indices},
+            "status": {index: "Done" for index in available_indices},
+            "replacement_user": {index: "" for index in available_indices},
+            "replacement_status": {index: "" for index in available_indices},
+        }
+        latest_data.loc[available_indices, "replacement_user"] = username
+        latest_data.loc[available_indices, "replacement_status"] = "Claimed"
+        latest_data.loc[available_indices, "replacement_original_input"] = latest_data.loc[available_indices, "input"]
+
+        if update_rows(
+            latest_data,
+            available_indices,
+            ["replacement_user", "replacement_status", "replacement_original_input"],
+            expected_values,
+        ):
+            return len(available_indices)
+        return 0
+
+
+def build_generation_prompt(source_text):
+    return (
+        "Anda adalah asisten penulisan data klinis berbahasa Indonesia.\n"
+        "Tugas: ubah data rekam medis mentah berikut menjadi narasi kasus yang utuh, alami, dan mudah dibaca.\n\n"
+        "Aturan wajib:\n"
+        f"- Hapus seluruh teks pembatas `{DELIMITER_TEXT}`.\n"
+        "- Ubah format SOAP, bullet, tabel, simbol, singkatan umum, dan potongan frasa menjadi kalimat naratif.\n"
+        "- Pertahankan informasi medis penting seperti keluhan, riwayat, temuan pemeriksaan, diagnosis/asesmen, tindakan, terapi, dan rencana.\n"
+        "- Jangan menambahkan fakta baru yang tidak ada pada data sumber.\n"
+        "- Jika ada bagian yang tidak jelas, tulis secara netral tanpa mengarang.\n"
+        "- Gunakan bahasa Indonesia klinis yang rapi dalam satu paragraf narasi atau beberapa kalimat pendek.\n"
+        "- Jangan menulis ulang label SOAP sebagai daftar.\n\n"
+        f"Data sumber:\n{source_text}\n\nNarasi kasus:"
+    )
+
+
+def call_huggingface_model(model_id, source_text, temperature, max_new_tokens):
+    token = get_secret_value("HUGGINGFACE_API_KEY", "HUGGINGFACE_API_TOKEN", "HF_TOKEN")
+    headers = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    payload = {
+        "inputs": build_generation_prompt(source_text),
+        "parameters": {
+            "max_new_tokens": int(max_new_tokens),
+            "temperature": float(temperature),
+            "return_full_text": False,
+        },
+        "options": {"wait_for_model": True},
+    }
+    response = requests.post(
+        f"https://api-inference.huggingface.co/models/{model_id}",
+        headers=headers,
+        json=payload,
+        timeout=120,
+    )
+    response.raise_for_status()
+    result = response.json()
+
+    if isinstance(result, list) and result:
+        first = result[0]
+        return normalize_cell(
+            first.get("generated_text")
+            or first.get("summary_text")
+            or first.get("translation_text")
+            or str(first)
+        )
+    if isinstance(result, dict):
+        if "error" in result:
+            raise ValueError(result["error"])
+        return normalize_cell(
+            result.get("generated_text")
+            or result.get("summary_text")
+            or result.get("translation_text")
+            or str(result)
+        )
+    return normalize_cell(str(result))
+
+
+def clean_narrative(text):
+    narrative = normalize_cell(text).replace(DELIMITER_TEXT, " ")
+    return " ".join(narrative.split())
+
+
+if not st.session_state.get("replacement_logged_in", False):
+    st.title("Login Replacement Narasi")
+    st.markdown("### Masuk sebagai user replacement")
+
+    col_login, col_info = st.columns([1, 2])
+    with col_login:
+        selected_user = st.selectbox(
+            "User:",
+            options=AUTHORIZED_REPLACEMENT_USERS,
+            index=None,
+            placeholder="Pilih user...",
+        )
+        password = st.text_input("Password:", type="password", placeholder="Masukkan password 6 karakter")
+
+        if st.button("Masuk", type="primary", use_container_width=True):
+            if not selected_user:
+                st.error("Pilih user terlebih dahulu.")
+            elif REPLACEMENT_USER_CREDENTIALS.get(selected_user) == password:
+                st.session_state["replacement_logged_in"] = True
+                st.session_state["replacement_username"] = selected_user
+                st.rerun()
+            else:
+                st.error("User atau password tidak sesuai.")
+
+    with col_info:
+        st.info(
+            "User replacement yang tersedia: user 1, user 2, dan user 3. "
+            "Tugas hanya mengambil data dengan status Done dan input berisi pembatas."
+        )
+    st.stop()
+
+
+username = st.session_state["replacement_username"]
+
+st.markdown(
+    """
+<style>
+    [data-testid="collapsedControl"] { display: none; }
+    [data-testid="stSidebarNav"] { display: none; }
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+col_home, col_logout = st.sidebar.columns(2)
+with col_home:
+    if st.button("Kembali", use_container_width=True):
+        st.session_state["replacement_logged_in"] = False
+        st.session_state.pop("replacement_username", None)
+        st.switch_page("app.py")
+with col_logout:
+    if st.button("Logout", use_container_width=True):
+        st.session_state["replacement_logged_in"] = False
+        st.session_state.pop("replacement_username", None)
+        st.rerun()
+
+st.sidebar.caption(f"User aktif: {username}")
+
+st.title("Replacement Data Input ke Narasi")
+st.caption(f"Filter: kolom input mengandung `{DELIMITER_TEXT}` dan status bernilai `Done`.")
+
+df = load_data()
+if df is None or df.empty:
+    st.error("Google Sheet kosong atau tidak dapat diakses.")
+    st.stop()
+
+df = prepare_sheet_data(df)
+
+available_count = len(df[unclaimed_pool_mask(df)])
+my_active_df = df[
+    (df["replacement_user"] == username)
+    & (df["replacement_status"] != "Done")
+    & (df["input"].str.contains(DELIMITER_TEXT, case=False, na=False, regex=False))
+    & (df["status"] == "Done")
+].copy()
+my_done_count = len(df[(df["replacement_user"] == username) & (df["replacement_status"] == "Done")])
+all_done_count = len(df[df["replacement_status"] == "Done"])
+
+st.sidebar.metric("Tersedia", available_count)
+st.sidebar.metric("Tugas Aktif Saya", len(my_active_df))
+st.sidebar.metric("Selesai Saya", my_done_count)
+st.sidebar.metric("Total Replacement Done", all_done_count)
+
+with st.sidebar.expander("Pengaturan Model", expanded=True):
+    model_choice = st.selectbox("Model Hugging Face:", DEFAULT_MODELS + ["Custom model"], index=0)
+    custom_model = st.text_input("Custom model id:", placeholder="contoh: google/flan-t5-base")
+    selected_model = custom_model.strip() if model_choice == "Custom model" and custom_model.strip() else model_choice
+    temperature = st.slider("Temperature", min_value=0.1, max_value=1.5, value=0.7, step=0.1)
+    max_new_tokens = st.slider("Max new tokens", min_value=32, max_value=512, value=320, step=16)
+
+if not get_secret_value("HUGGINGFACE_API_KEY", "HUGGINGFACE_API_TOKEN", "HF_TOKEN"):
+    st.warning(
+        "Token Hugging Face belum ditemukan di Streamlit secrets. "
+        "Generate tetap dicoba tanpa token, tetapi bisa terkena rate limit atau ditolak oleh model tertentu."
+    )
+
+with st.form("claim_replacement_form"):
+    st.markdown("### Ambil Tugas Replacement")
+    batch_size = st.number_input("Jumlah baris yang ingin diambil:", min_value=1, max_value=25, value=5)
+    submitted_claim = st.form_submit_button("Ambil Tugas", type="primary", use_container_width=True)
+    if submitted_claim:
+        claimed = claim_tasks(df, username, batch_size)
+        if claimed:
+            st.success(f"Berhasil mengambil {claimed} tugas replacement.")
+            st.rerun()
+
+st.divider()
+
+if my_active_df.empty:
+    st.info("Belum ada tugas aktif. Ambil tugas baru dari panel di atas.")
+else:
+    st.markdown(f"### Area Kerja ({len(my_active_df)} data)")
+
+for index, row in my_active_df.iterrows():
+    original_input = normalize_cell(row.get("replacement_original_input")) or normalize_cell(row.get("input"))
+    generated_key = f"replacement_generated_{index}"
+    editor_key = f"replacement_editor_{index}"
+
+    if editor_key not in st.session_state:
+        st.session_state[editor_key] = normalize_cell(row.get("replacement_narrative"))
+
+    escaped_original_input = escape(original_input)
+
+    st.markdown(
+        f"""
+        <div class="task-header">
+            <strong>Data #{index + 1}</strong> - diklaim oleh {username}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    col_source, col_editor = st.columns(2, gap="large")
+    with col_source:
+        st.markdown("**Input Asli**")
+        st.markdown(f"<div class='source-box'>{escaped_original_input}</div>", unsafe_allow_html=True)
+
+    with col_editor:
+        st.markdown("**Narasi Replacement**")
+        narrative_value = st.text_area(
+            "Narasi Replacement",
+            key=editor_key,
+            height=260,
+            max_chars=MAX_SHEET_CELL_CHARS,
+            label_visibility="collapsed",
+            placeholder="Generate dari Hugging Face atau tulis narasi final di sini...",
+        )
+
+    col_generate, col_copy, col_save = st.columns([1.2, 1, 1.2], gap="small")
+    with col_generate:
+        if st.button("Generate Narasi", key=f"generate_{index}", type="primary", use_container_width=True):
+            with st.spinner(f"Memanggil model {selected_model}..."):
+                try:
+                    generated_text = call_huggingface_model(
+                        selected_model,
+                        original_input,
+                        temperature,
+                        max_new_tokens,
+                    )
+                    cleaned_text = clean_narrative(generated_text)
+                    if not cleaned_text:
+                        st.error("Model tidak mengembalikan narasi. Coba generate ulang atau pilih model lain.")
+                    else:
+                        st.session_state[generated_key] = cleaned_text
+                        st.session_state[editor_key] = cleaned_text
+                        st.success("Narasi berhasil dibuat. Anda bisa generate ulang atau edit sebelum simpan.")
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Gagal generate narasi: {e}")
+
+    with col_copy:
+        if st.button("Bersihkan Pembatas", key=f"clean_{index}", use_container_width=True):
+            st.session_state[editor_key] = clean_narrative(narrative_value)
+            st.rerun()
+
+    with col_save:
+        if st.button("Simpan Final", key=f"save_replacement_{index}", use_container_width=True):
+            final_narrative = clean_narrative(st.session_state.get(editor_key, ""))
+            if not final_narrative:
+                st.error("Narasi final wajib diisi.")
+            elif DELIMITER_TEXT in final_narrative:
+                st.error("Narasi final masih mengandung teks pembatas.")
+            elif len(final_narrative) > MAX_SHEET_CELL_CHARS:
+                st.error(f"Narasi final melebihi {MAX_SHEET_CELL_CHARS:,} karakter.")
+            else:
+                expected_values = {
+                    "input": {index: normalize_cell(row.get("input"))},
+                    "status": {index: "Done"},
+                    "replacement_user": {index: username},
+                    "replacement_status": {index: normalize_cell(row.get("replacement_status"))},
+                    "replacement_original_input": {index: normalize_cell(row.get("replacement_original_input"))},
+                }
+                df.at[index, "input"] = final_narrative
+                df.at[index, "replacement_user"] = username
+                df.at[index, "replacement_status"] = "Done"
+                df.at[index, "replacement_model"] = selected_model
+                df.at[index, "replacement_original_input"] = original_input
+                df.at[index, "replacement_narrative"] = final_narrative
+                df.at[index, "replacement_saved_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                if update_rows(
+                    df,
+                    [index],
+                    [
+                        "input",
+                        "replacement_user",
+                        "replacement_status",
+                        "replacement_model",
+                        "replacement_original_input",
+                        "replacement_narrative",
+                        "replacement_saved_at",
+                    ],
+                    expected_values,
+                ):
+                    st.success(f"Data #{index + 1} berhasil disimpan sebagai narasi.")
+                    time.sleep(0.5)
+                    st.rerun()
+
+    with st.expander("Preview metadata", expanded=False):
+        st.write(
+            {
+                "row_sheet": index + 1,
+                "status": row.get("status", ""),
+                "validator": row.get("validator", ""),
+                "replacement_status": row.get("replacement_status", ""),
+                "model_terpilih": selected_model,
+            }
+        )
+
+    st.divider()

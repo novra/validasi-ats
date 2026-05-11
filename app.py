@@ -77,7 +77,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- NAVIGASI ---
-col1, col2 = st.columns(2, gap="medium")
+col1, col2, col3 = st.columns(3, gap="medium")
 
 with col1:
     if st.button("👤 User Labeling", use_container_width=True, type="primary", help="Mulai mengisi data"):
@@ -86,6 +86,10 @@ with col1:
 with col2:
     if st.button("📊 Admin Monitoring", use_container_width=True, help="Pantau progress validator"):
         st.switch_page("pages/02_📊_Admin_Monitoring.py")
+
+with col3:
+    if st.button("Replacement Narasi", use_container_width=True, help="Ubah input berpembatas menjadi narasi"):
+        st.switch_page("pages/03_Replacement_Narasi.py")
 
 st.divider()
 
