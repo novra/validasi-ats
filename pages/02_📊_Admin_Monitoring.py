@@ -11,7 +11,7 @@ import re
 import time
 from auth_config import AUTHORIZED_USERS, ADMIN_CREDENTIALS, AUTHORIZED_ADMINS, REPLACEMENT_ADMINS, SYNTHETIC_DATA_ADMINS
 from sheet_lock import get_sheet_write_lock
-from synthetic_ats_data import generate_synthetic_ats_cases, get_synthetic_balance_summary
+from synthetic_ats_data import ATS_LEVELS, generate_synthetic_ats_cases, get_synthetic_balance_summary
 
 # --- KONFIGURASI HALAMAN ---
 st.set_page_config(layout="wide", page_title="Admin Monitoring Pelabelan")
@@ -610,6 +610,44 @@ def get_problematic_similarity_case_ids(similarity_result):
     for pair in similarity_result.get("existing_pairs", []):
         case_ids.add(pair.get("kasus_sintetis", ""))
     return sorted(case_id for case_id in case_ids if case_id)
+
+def diversify_problematic_input_only_locally(draft, similarity_result, max_cases=20):
+    problematic_ids = get_problematic_similarity_case_ids(similarity_result)[:max_cases]
+    if not problematic_ids:
+        return draft.copy(), 0
+
+    draft = draft.copy()
+    valid_level_colors = {level_color for _, level_color, _ in ATS_LEVELS}
+    changed_count = 0
+
+    for offset, synthetic_id in enumerate(problematic_ids):
+        row_matches = draft.index[draft["synthetic_case_id"] == synthetic_id].tolist()
+        if not row_matches:
+            continue
+
+        row_index = row_matches[0]
+        target_color = draft.at[row_index, "synthetic_ats_level"]
+        if target_color not in valid_level_colors:
+            continue
+
+        varied_pool = generate_synthetic_ats_cases(
+            total_cases=700,
+            seed=20260518 + 1000 + offset,
+            start_number=900000 + (offset * 700),
+        )
+        varied_candidates = varied_pool[varied_pool["synthetic_ats_level"] == target_color]
+        if varied_candidates.empty:
+            continue
+
+        varied_row = varied_candidates.iloc[offset % len(varied_candidates)]
+        draft.at[row_index, "input"] = varied_row["input"].replace(varied_row["synthetic_case_id"], synthetic_id)
+        draft.at[row_index, "instruction_ats"] = ""
+        draft.at[row_index, "output_ats"] = ""
+        draft.at[row_index, "validator"] = ""
+        draft.at[row_index, "status"] = ""
+        changed_count += 1
+
+    return draft.reset_index(drop=True), changed_count
 
 def diversify_problematic_input_only_with_gemini(draft, similarity_result, api_key, max_cases=5):
     problematic_ids = get_problematic_similarity_case_ids(similarity_result)
@@ -1427,16 +1465,29 @@ if can_manage_synthetic_data:
                 disabled=problematic_input_count == 0,
             ):
                 try:
-                    varied_draft, varied_count = diversify_problematic_input_only_with_gemini(
-                        st.session_state["synthetic_input_only_draft"],
-                        st.session_state["synthetic_input_only_similarity_result"],
-                        gemini_api_key,
-                        max_cases=int(max_gemini_variation_cases),
-                    )
+                    try:
+                        varied_draft, varied_count = diversify_problematic_input_only_with_gemini(
+                            st.session_state["synthetic_input_only_draft"],
+                            st.session_state["synthetic_input_only_similarity_result"],
+                            gemini_api_key,
+                            max_cases=int(max_gemini_variation_cases),
+                        )
+                        variation_source = "Gemini"
+                    except requests.HTTPError as e:
+                        status_code = e.response.status_code if e.response is not None else None
+                        if status_code != 429:
+                            raise
+                        varied_draft, varied_count = diversify_problematic_input_only_locally(
+                            st.session_state["synthetic_input_only_draft"],
+                            st.session_state["synthetic_input_only_similarity_result"],
+                            max_cases=int(max_gemini_variation_cases),
+                        )
+                        variation_source = "fallback lokal karena Gemini masih rate limited"
+
                     st.session_state["synthetic_input_only_draft"] = varied_draft
                     st.session_state["synthetic_input_only_similarity_result"] = None
                     st.success(
-                        f"Variasi narasi {varied_count} input yang terdeteksi similar berhasil ditingkatkan dengan Gemini."
+                        f"Variasi narasi {varied_count} input yang terdeteksi similar berhasil dibuat memakai {variation_source}."
                     )
                     st.rerun()
                 except Exception as e:
@@ -1444,7 +1495,7 @@ if can_manage_synthetic_data:
         with gemini_input_col2:
             st.caption(
                 f"Terdeteksi {problematic_input_count} input similar. Gemini hanya akan menulis ulang input bermasalah "
-                "secara bertahap, satu kasus per request, dengan jeda antar request untuk mengurangi risiko 429."
+                "secara bertahap. Jika Gemini tetap rate limited, aplikasi otomatis memakai variasi lokal."
             )
 
         st.dataframe(
