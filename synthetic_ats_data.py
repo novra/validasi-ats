@@ -164,7 +164,7 @@ def extract_learning_section(learning_notes, section_name):
     return learning_notes[content_start:content_end].strip()
 
 
-def build_instruction_ats(case_text, level_key, learning_notes=""):
+def build_instruction_ats(level_key, learning_notes=""):
     context_style = extract_learning_section(learning_notes, "POLA_KONTEKS")
     knowledge_style = extract_learning_section(learning_notes, "POLA_PENGETAHUAN")
     intervention_style = extract_learning_section(learning_notes, "POLA_INTERVENSI_IGD")
@@ -193,12 +193,17 @@ def build_instruction_ats(case_text, level_key, learning_notes=""):
     )
 
     return (
-        f"Konteks:\n{case_text}{context_guidance}\n\n"
+        "Konteks:\n"
+        "Anda berperan sebagai dokter atau perawat IGD yang sedang melakukan triase awal terhadap pasien "
+        "berdasarkan data input. Tugas Anda adalah menilai tingkat kegawatan, stabilitas tanda vital, "
+        "risiko perburukan, dan kebutuhan intervensi segera sesuai prinsip Australian Triage Scale."
+        f"{context_guidance}\n\n"
         f"Pengetahuan:\n{ATS_KNOWLEDGE[level_key]}{knowledge_guidance}\n\n"
         f"Intervensi penyelamatan nyawa segera yang umum di IGD:\n{ATS_INTERVENTIONS[level_key]}{intervention_guidance}\n\n"
         "Instruksi:\n"
-        "Tentukan level ATS yang paling tepat berdasarkan kondisi klinis, tanda vital, derajat kegawatan, "
-        "risiko perburukan, kebutuhan waktu penanganan, dan kebutuhan intervensi segera. "
+        "Gunakan data pada kolom input sebagai kasus pasien yang harus dinilai. Tentukan level ATS yang paling tepat "
+        "berdasarkan kondisi klinis, tanda vital, derajat kegawatan, risiko perburukan, kebutuhan waktu penanganan, "
+        "dan kebutuhan intervensi segera. "
         "Berikan jawaban ringkas dan konsisten dengan format output ATS."
         f"{instruction_guidance}"
         f"{rules_guidance}"
@@ -294,7 +299,7 @@ def generate_synthetic_ats_cases(total_cases=700, seed=20260518, learning_notes=
             )
             rows.append(
                 {
-                    "instruction_ats": build_instruction_ats(case_text, level_key, learning_notes),
+                    "instruction_ats": build_instruction_ats(level_key, learning_notes),
                     "input": case_text,
                     "output_ats": build_output_ats(
                         level_key,
