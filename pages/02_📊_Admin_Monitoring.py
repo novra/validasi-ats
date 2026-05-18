@@ -27,7 +27,8 @@ PROBLEM_KEYWORDS_LABEL = "sama, serupa, double, seperti sebelumnya, atau terlalu
 PROBLEM_PATTERN = r"\b(?:sama|serupa|double)\b|seperti\s+sebelumnya|terlalu\s+banyak"
 SYNTHETIC_SIMILARITY_THRESHOLD = 0.86
 SYNTHETIC_CASE_ID_PATTERN = re.compile(r"^ATS-SYN-(\d+)$")
-GEMINI_RETRY_DELAYS = [2, 5, 10]
+GEMINI_RETRY_DELAYS = [15, 45, 90]
+GEMINI_INTER_REQUEST_DELAY_SECONDS = 6
 
 def normalize_cell(value):
     if pd.isna(value):
@@ -505,22 +506,35 @@ def post_gemini_generate_content(api_key, prompt, generation_config, timeout=90)
             status_code = e.response.status_code if e.response is not None else None
             if status_code not in {429, 500, 502, 503, 504} or attempt_index >= len(GEMINI_RETRY_DELAYS):
                 raise
+            retry_after = None
+            if e.response is not None:
+                retry_after_header = e.response.headers.get("Retry-After")
+                if retry_after_header:
+                    try:
+                        retry_after = int(retry_after_header)
+                    except ValueError:
+                        retry_after = None
         except requests.RequestException as e:
             last_error = e
             if attempt_index >= len(GEMINI_RETRY_DELAYS):
                 raise
+            retry_after = None
 
-        time.sleep(GEMINI_RETRY_DELAYS[attempt_index])
+        delay_seconds = retry_after or GEMINI_RETRY_DELAYS[attempt_index]
+        time.sleep(delay_seconds)
 
     raise last_error
 
-def diversify_input_only_with_gemini(draft, api_key, batch_size=10):
+def diversify_input_only_with_gemini(draft, api_key, batch_size=1):
     if not api_key:
         raise ValueError("API key Gemini belum ditemukan dari secret GEMINI_API_KEY.")
 
     varied_rows = []
     draft = draft.copy()
     for start_index in range(0, len(draft), batch_size):
+        if start_index > 0:
+            time.sleep(GEMINI_INTER_REQUEST_DELAY_SECONDS)
+
         batch = draft.iloc[start_index:start_index + batch_size].copy()
         case_text = "\n\n".join(
             (
@@ -547,7 +561,7 @@ def diversify_input_only_with_gemini(draft, api_key, batch_size=10):
             prompt,
             {
                 "temperature": 0.85,
-                "maxOutputTokens": 5000,
+                "maxOutputTokens": 1600,
             },
             timeout=90,
         )
@@ -597,15 +611,16 @@ def get_problematic_similarity_case_ids(similarity_result):
         case_ids.add(pair.get("kasus_sintetis", ""))
     return sorted(case_id for case_id in case_ids if case_id)
 
-def diversify_problematic_input_only_with_gemini(draft, similarity_result, api_key):
+def diversify_problematic_input_only_with_gemini(draft, similarity_result, api_key, max_cases=5):
     problematic_ids = get_problematic_similarity_case_ids(similarity_result)
+    problematic_ids = problematic_ids[:max_cases]
     if not problematic_ids:
         return draft.copy(), 0
 
     draft = draft.copy()
     target_mask = draft["synthetic_case_id"].isin(problematic_ids)
     target_rows = draft[target_mask].copy()
-    varied_rows = diversify_input_only_with_gemini(target_rows, api_key, batch_size=5)
+    varied_rows = diversify_input_only_with_gemini(target_rows, api_key, batch_size=1)
     varied_rows = varied_rows.set_index("synthetic_case_id")
 
     for index, row in draft[target_mask].iterrows():
@@ -1393,18 +1408,30 @@ if can_manage_synthetic_data:
                 st.success("Draft 700 input berikutnya dibuat dengan ID lanjutan.")
                 st.rerun()
 
+        problematic_input_count = len(
+            get_problematic_similarity_case_ids(st.session_state["synthetic_input_only_similarity_result"])
+        )
         gemini_input_col1, gemini_input_col2 = st.columns([1, 2])
         with gemini_input_col1:
+            max_gemini_variation_cases = st.number_input(
+                "Jumlah maksimal input divariasikan",
+                min_value=1,
+                max_value=20,
+                value=min(5, max(problematic_input_count, 1)),
+                step=1,
+                disabled=problematic_input_count == 0,
+            )
             if st.button(
                 "Variasikan Input yang Similar dengan Gemini",
                 use_container_width=True,
-                disabled=st.session_state["synthetic_input_only_similarity_result"] is None,
+                disabled=problematic_input_count == 0,
             ):
                 try:
                     varied_draft, varied_count = diversify_problematic_input_only_with_gemini(
                         st.session_state["synthetic_input_only_draft"],
                         st.session_state["synthetic_input_only_similarity_result"],
                         gemini_api_key,
+                        max_cases=int(max_gemini_variation_cases),
                     )
                     st.session_state["synthetic_input_only_draft"] = varied_draft
                     st.session_state["synthetic_input_only_similarity_result"] = None
@@ -1416,8 +1443,8 @@ if can_manage_synthetic_data:
                     st.error(f"Gagal meningkatkan variasi input dengan Gemini: {e}")
         with gemini_input_col2:
             st.caption(
-                "Jalankan Cek Similarity terlebih dahulu. Gemini hanya akan menulis ulang input yang terdeteksi similar, "
-                "sehingga request lebih sedikit dan tetap mempertahankan level ATS target."
+                f"Terdeteksi {problematic_input_count} input similar. Gemini hanya akan menulis ulang input bermasalah "
+                "secara bertahap, satu kasus per request, dengan jeda antar request untuk mengurangi risiko 429."
             )
 
         st.dataframe(
