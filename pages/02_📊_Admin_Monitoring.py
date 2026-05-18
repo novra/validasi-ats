@@ -27,6 +27,7 @@ PROBLEM_KEYWORDS_LABEL = "sama, serupa, double, seperti sebelumnya, atau terlalu
 PROBLEM_PATTERN = r"\b(?:sama|serupa|double)\b|seperti\s+sebelumnya|terlalu\s+banyak"
 SYNTHETIC_SIMILARITY_THRESHOLD = 0.86
 SYNTHETIC_CASE_ID_PATTERN = re.compile(r"^ATS-SYN-(\d+)$")
+GEMINI_RETRY_DELAYS = [2, 5, 10]
 
 def normalize_cell(value):
     if pd.isna(value):
@@ -481,7 +482,39 @@ def learn_existing_ats_style_with_gemini(examples, api_key):
         raise ValueError("Hasil pembelajaran Gemini kosong.")
     return learned_text
 
-def diversify_input_only_with_gemini(draft, api_key, batch_size=20):
+def post_gemini_generate_content(api_key, prompt, generation_config, timeout=90):
+    last_error = None
+    for attempt_index in range(len(GEMINI_RETRY_DELAYS) + 1):
+        try:
+            response = requests.post(
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+                headers={
+                    "x-goog-api-key": api_key,
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": generation_config,
+                },
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            return response
+        except requests.HTTPError as e:
+            last_error = e
+            status_code = e.response.status_code if e.response is not None else None
+            if status_code not in {429, 500, 502, 503, 504} or attempt_index >= len(GEMINI_RETRY_DELAYS):
+                raise
+        except requests.RequestException as e:
+            last_error = e
+            if attempt_index >= len(GEMINI_RETRY_DELAYS):
+                raise
+
+        time.sleep(GEMINI_RETRY_DELAYS[attempt_index])
+
+    raise last_error
+
+def diversify_input_only_with_gemini(draft, api_key, batch_size=10):
     if not api_key:
         raise ValueError("API key Gemini belum ditemukan dari secret GEMINI_API_KEY.")
 
@@ -509,22 +542,15 @@ def diversify_input_only_with_gemini(draft, api_key, batch_size=20):
             "INPUT: narasi baru satu paragraf atau beberapa paragraf pendek\n\n"
             "Ulangi untuk semua ID, jangan tambah ID baru."
         )
-        response = requests.post(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
-            headers={
-                "x-goog-api-key": api_key,
-                "Content-Type": "application/json",
-            },
-            json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {
-                    "temperature": 0.85,
-                    "maxOutputTokens": 7000,
-                },
+        response = post_gemini_generate_content(
+            api_key,
+            prompt,
+            {
+                "temperature": 0.85,
+                "maxOutputTokens": 5000,
             },
             timeout=90,
         )
-        response.raise_for_status()
         payload = response.json()
         parts = payload.get("candidates", [{}])[0].get("content", {}).get("parts", [])
         result_text = "\n".join(part.get("text", "") for part in parts).strip()
