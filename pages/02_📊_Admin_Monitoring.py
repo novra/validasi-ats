@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 import os
 import requests
+from difflib import SequenceMatcher
 import time
 from auth_config import AUTHORIZED_USERS, ADMIN_CREDENTIALS, AUTHORIZED_ADMINS, REPLACEMENT_ADMINS, SYNTHETIC_DATA_ADMINS
 from sheet_lock import get_sheet_write_lock
@@ -23,6 +24,7 @@ MAX_SHEET_CELL_CHARS = 50000
 LENGTH_LIMIT_COLUMNS = ['instruction_ats', 'output_ats']
 PROBLEM_KEYWORDS_LABEL = "sama, serupa, double, seperti sebelumnya, atau terlalu banyak"
 PROBLEM_PATTERN = r"\b(?:sama|serupa|double)\b|seperti\s+sebelumnya|terlalu\s+banyak"
+SYNTHETIC_SIMILARITY_THRESHOLD = 0.86
 
 def normalize_cell(value):
     if pd.isna(value):
@@ -402,6 +404,176 @@ def learn_existing_ats_style_with_gemini(examples, api_key):
         raise ValueError("Hasil pembelajaran Gemini kosong.")
     return learned_text
 
+def normalize_similarity_text(value):
+    return " ".join(normalize_cell(value).lower().split())
+
+def get_high_similarity_pairs(candidate_texts, reference_texts=None, threshold=SYNTHETIC_SIMILARITY_THRESHOLD, limit=30):
+    candidate_texts = [normalize_similarity_text(text) for text in candidate_texts]
+    reference_texts = [normalize_similarity_text(text) for text in reference_texts] if reference_texts is not None else None
+    pairs = []
+
+    try:
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        from sklearn.metrics.pairwise import cosine_similarity
+
+        if reference_texts is None:
+            vectorizer = TfidfVectorizer(analyzer="char_wb", ngram_range=(3, 5), min_df=1)
+            matrix = vectorizer.fit_transform(candidate_texts)
+            similarity_matrix = cosine_similarity(matrix)
+            for left_index in range(len(candidate_texts)):
+                for right_index in range(left_index + 1, len(candidate_texts)):
+                    score = float(similarity_matrix[left_index, right_index])
+                    if score >= threshold:
+                        pairs.append((left_index, right_index, score))
+        else:
+            combined_texts = candidate_texts + reference_texts
+            vectorizer = TfidfVectorizer(analyzer="char_wb", ngram_range=(3, 5), min_df=1)
+            matrix = vectorizer.fit_transform(combined_texts)
+            similarity_matrix = cosine_similarity(matrix[:len(candidate_texts)], matrix[len(candidate_texts):])
+            for candidate_index in range(similarity_matrix.shape[0]):
+                for reference_index in range(similarity_matrix.shape[1]):
+                    score = float(similarity_matrix[candidate_index, reference_index])
+                    if score >= threshold:
+                        pairs.append((candidate_index, reference_index, score))
+    except Exception:
+        if reference_texts is None:
+            for left_index in range(len(candidate_texts)):
+                for right_index in range(left_index + 1, len(candidate_texts)):
+                    score = SequenceMatcher(None, candidate_texts[left_index], candidate_texts[right_index]).ratio()
+                    if score >= threshold:
+                        pairs.append((left_index, right_index, score))
+        else:
+            for candidate_index, candidate_text in enumerate(candidate_texts):
+                for reference_index, reference_text in enumerate(reference_texts):
+                    score = SequenceMatcher(None, candidate_text, reference_text).ratio()
+                    if score >= threshold:
+                        pairs.append((candidate_index, reference_index, score))
+
+    return sorted(pairs, key=lambda item: item[2], reverse=True)[:limit]
+
+def validate_synthetic_similarity(synthetic_data, existing_data, threshold=SYNTHETIC_SIMILARITY_THRESHOLD):
+    synthetic_data = synthetic_data.copy()
+    synthetic_data["input"] = synthetic_data["input"].fillna("").astype(str).str.strip()
+    synthetic_data = synthetic_data[synthetic_data["input"] != ""].copy()
+
+    synthetic_inputs = synthetic_data["input"].tolist()
+    synthetic_ids = synthetic_data["synthetic_case_id"].fillna("").astype(str).tolist()
+    duplicate_pairs = get_high_similarity_pairs(synthetic_inputs, threshold=threshold)
+
+    existing_inputs = (
+        prepare_sheet_data(existing_data)["input"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+    existing_inputs = existing_inputs[existing_inputs != ""].tolist()
+    existing_pairs = get_high_similarity_pairs(synthetic_inputs, existing_inputs, threshold=threshold)
+
+    return {
+        "duplicate_pairs": [
+            {
+                "kasus_1": synthetic_ids[left_index],
+                "kasus_2": synthetic_ids[right_index],
+                "similarity": round(score, 3),
+                "input_1": synthetic_inputs[left_index],
+                "input_2": synthetic_inputs[right_index],
+            }
+            for left_index, right_index, score in duplicate_pairs
+        ],
+        "existing_pairs": [
+            {
+                "kasus_sintetis": synthetic_ids[candidate_index],
+                "baris_existing": reference_index + 1,
+                "similarity": round(score, 3),
+                "input_sintetis": synthetic_inputs[candidate_index],
+                "input_existing": existing_inputs[reference_index],
+            }
+            for candidate_index, reference_index, score in existing_pairs
+        ],
+    }
+
+def adjudicate_similarity_with_gemini(similarity_result, api_key, max_pairs=12):
+    if not api_key:
+        raise ValueError("API key Gemini belum ditemukan dari secret GEMINI_API_KEY.")
+
+    candidate_pairs = []
+    for pair in similarity_result.get("duplicate_pairs", []):
+        candidate_pairs.append(
+            {
+                "tipe": "antar_sintetis",
+                "label": f"{pair['kasus_1']} vs {pair['kasus_2']}",
+                "similarity": pair["similarity"],
+                "teks_1": pair["input_1"],
+                "teks_2": pair["input_2"],
+            }
+        )
+    for pair in similarity_result.get("existing_pairs", []):
+        candidate_pairs.append(
+            {
+                "tipe": "sintetis_vs_existing",
+                "label": f"{pair['kasus_sintetis']} vs existing row {pair['baris_existing']}",
+                "similarity": pair["similarity"],
+                "teks_1": pair["input_sintetis"],
+                "teks_2": pair["input_existing"],
+            }
+        )
+
+    candidate_pairs = sorted(candidate_pairs, key=lambda item: item["similarity"], reverse=True)[:max_pairs]
+    if not candidate_pairs:
+        return "Tidak ada kandidat similarity tinggi untuk dinilai Gemini.", False
+
+    pair_text = "\n\n".join(
+        (
+            f"PASANGAN {idx + 1}\n"
+            f"Tipe: {pair['tipe']}\n"
+            f"Label: {pair['label']}\n"
+            f"Skor similarity awal: {pair['similarity']}\n"
+            f"Teks A:\n{pair['teks_1'][:1800]}\n"
+            f"Teks B:\n{pair['teks_2'][:1800]}"
+        )
+        for idx, pair in enumerate(candidate_pairs)
+    )
+    prompt = (
+        "Anda adalah reviewer data triase IGD. Nilai apakah pasangan kasus berikut terlalu mirip secara klinis, "
+        "bukan hanya mirip kata-kata. Pertimbangkan keluhan utama, kronologi, tanda vital, tingkat kegawatan, "
+        "temuan awal, dan konteks triase.\n\n"
+        f"{pair_text}\n\n"
+        "Kembalikan jawaban dalam bahasa Indonesia dengan format berikut:\n"
+        "RINGKASAN:\n"
+        "- jumlah pasangan yang dinilai terlalu mirip secara klinis.\n\n"
+        "DETAIL:\n"
+        "- [Label pasangan] KEPUTUSAN: TERLALU_MIRIP atau AMAN. ALASAN: ... SARAN_EDIT: ...\n\n"
+        "WAJIB_SIMILARITY_BERMASALAH: YA atau TIDAK\n"
+        "Gunakan YA jika minimal satu pasangan TERLALU_MIRIP."
+    )
+    response = requests.post(
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+        headers={
+            "x-goog-api-key": api_key,
+            "Content-Type": "application/json",
+        },
+        json={
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0.1,
+                "maxOutputTokens": 2200,
+            },
+        },
+        timeout=60,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    candidates = payload.get("candidates", [])
+    if not candidates:
+        raise ValueError("Gemini tidak mengembalikan hasil adjudikasi similarity.")
+    parts = candidates[0].get("content", {}).get("parts", [])
+    result_text = "\n".join(part.get("text", "") for part in parts).strip()
+    if not result_text:
+        raise ValueError("Hasil adjudikasi Gemini kosong.")
+
+    has_problem = "WAJIB_SIMILARITY_BERMASALAH: YA" in result_text.upper()
+    return result_text, has_problem
+
 def append_synthetic_ats_cases(total_cases=700, synthetic_data=None, status_value="Done"):
     try:
         with get_sheet_write_lock():
@@ -581,6 +753,10 @@ if can_manage_synthetic_data:
         st.session_state["synthetic_ats_draft"] = generate_synthetic_ats_cases(total_cases=700)
     if "synthetic_learning_notes" not in st.session_state:
         st.session_state["synthetic_learning_notes"] = ""
+    if "synthetic_similarity_result" not in st.session_state:
+        st.session_state["synthetic_similarity_result"] = None
+    if "synthetic_gemini_similarity_review" not in st.session_state:
+        st.session_state["synthetic_gemini_similarity_review"] = None
 
     synthetic_preview = st.session_state["synthetic_ats_draft"].copy()
     with st.expander("Tambah 700 data sintetis ATS seimbang", expanded=is_synthetic_only_admin):
@@ -610,6 +786,8 @@ if can_manage_synthetic_data:
                         total_cases=700,
                         learning_notes=learned_notes,
                     )
+                    st.session_state["synthetic_similarity_result"] = None
+                    st.session_state["synthetic_gemini_similarity_review"] = None
                     st.success("Gemini selesai mempelajari pola data Done yang bersih.")
                     st.rerun()
                 except Exception as e:
@@ -624,6 +802,8 @@ if can_manage_synthetic_data:
                     total_cases=700,
                     learning_notes=st.session_state["synthetic_learning_notes"],
                 )
+                st.session_state["synthetic_similarity_result"] = None
+                st.session_state["synthetic_gemini_similarity_review"] = None
                 st.success("Draft sintetis dibuat ulang dari hasil pembelajaran.")
                 st.rerun()
 
@@ -690,6 +870,8 @@ if can_manage_synthetic_data:
                 st.session_state["synthetic_ats_draft"].at[selected_index, "instruction_ats"] = edited_instruction.strip()
                 st.session_state["synthetic_ats_draft"].at[selected_index, "output_ats"] = edited_output.strip()
                 st.session_state["synthetic_ats_draft"].at[selected_index, "validator"] = "sintetis"
+                st.session_state["synthetic_similarity_result"] = None
+                st.session_state["synthetic_gemini_similarity_review"] = None
                 st.success(f"Perubahan {selected_case_id} disimpan di draft.")
                 st.rerun()
         with edit_col2:
@@ -698,6 +880,8 @@ if can_manage_synthetic_data:
                     total_cases=700,
                     learning_notes=st.session_state["synthetic_learning_notes"],
                 )
+                st.session_state["synthetic_similarity_result"] = None
+                st.session_state["synthetic_gemini_similarity_review"] = None
                 st.success("Draft data sintetis dikembalikan ke versi awal.")
                 st.rerun()
 
@@ -722,9 +906,97 @@ if can_manage_synthetic_data:
             "Saya sudah meninjau data sintetis dan yakin ingin menyimpannya ke Google Sheet.",
             key="confirm_synthetic_append",
         )
-        can_save_synthetic = confirm_synthetic_append and bool(st.session_state["synthetic_learning_notes"])
+
+        similarity_col1, similarity_col2 = st.columns([1, 2])
+        with similarity_col1:
+            if st.button("Cek Similarity", use_container_width=True):
+                st.session_state["synthetic_similarity_result"] = validate_synthetic_similarity(
+                    st.session_state["synthetic_ats_draft"],
+                    df,
+                )
+                st.session_state["synthetic_gemini_similarity_review"] = None
+                st.rerun()
+        with similarity_col2:
+            st.caption(
+                f"Ambang similarity: {SYNTHETIC_SIMILARITY_THRESHOLD:.2f}. "
+                "Data yang terlalu mirip harus diedit sebelum disimpan."
+            )
+
+        similarity_result = st.session_state["synthetic_similarity_result"]
+        has_similarity_problem = False
+        requires_gemini_similarity_review = False
+        has_gemini_similarity_problem = False
+        if similarity_result is None:
+            st.warning("Cek similarity belum dijalankan untuk draft terbaru.")
+            has_similarity_problem = True
+        else:
+            duplicate_pairs = similarity_result["duplicate_pairs"]
+            existing_pairs = similarity_result["existing_pairs"]
+            has_similarity_problem = bool(duplicate_pairs or existing_pairs)
+            if duplicate_pairs:
+                st.error("Ada data sintetis yang terlalu mirip satu sama lain.")
+                st.dataframe(
+                    pd.DataFrame(duplicate_pairs).drop(columns=["input_1", "input_2"]),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            if existing_pairs:
+                st.error("Ada data sintetis yang terlalu mirip dengan input existing.")
+                st.dataframe(
+                    pd.DataFrame(existing_pairs).drop(columns=["input_sintetis", "input_existing"]),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            if not has_similarity_problem:
+                st.success("Similarity aman: tidak ada pasangan yang melewati ambang kemiripan.")
+            else:
+                requires_gemini_similarity_review = True
+
+                if st.button("Review Similarity dengan Gemini", use_container_width=True):
+                    try:
+                        review_text, has_problem = adjudicate_similarity_with_gemini(
+                            similarity_result,
+                            gemini_api_key,
+                        )
+                        st.session_state["synthetic_gemini_similarity_review"] = {
+                            "text": review_text,
+                            "has_problem": has_problem,
+                        }
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Gagal review similarity dengan Gemini: {e}")
+
+                gemini_review = st.session_state["synthetic_gemini_similarity_review"]
+                if gemini_review is None:
+                    st.warning("Kandidat similarity tinggi perlu direview Gemini sebelum data bisa disimpan.")
+                else:
+                    has_gemini_similarity_problem = gemini_review["has_problem"]
+                    st.text_area(
+                        "Hasil review similarity Gemini",
+                        value=gemini_review["text"],
+                        height=260,
+                    )
+                    if has_gemini_similarity_problem:
+                        st.error("Gemini menilai masih ada pasangan kasus yang terlalu mirip secara klinis.")
+                    else:
+                        st.success("Gemini menilai kandidat similarity tinggi masih aman secara klinis.")
+
+        can_save_synthetic = (
+            confirm_synthetic_append
+            and bool(st.session_state["synthetic_learning_notes"])
+            and (
+                not has_similarity_problem
+                or (
+                    requires_gemini_similarity_review
+                    and st.session_state["synthetic_gemini_similarity_review"] is not None
+                    and not has_gemini_similarity_problem
+                )
+            )
+        )
         if confirm_synthetic_append and not st.session_state["synthetic_learning_notes"]:
             st.warning("Jalankan pembelajaran Gemini terlebih dahulu sebelum menyimpan ke Google Sheet.")
+        if confirm_synthetic_append and has_similarity_problem:
+            st.warning("Selesaikan pengecekan similarity dan review Gemini sebelum menyimpan ke Google Sheet.")
         save_progress_col, save_final_col = st.columns(2)
         with save_progress_col:
             if st.button(
