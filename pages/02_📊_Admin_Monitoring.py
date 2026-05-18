@@ -319,15 +319,13 @@ def replace_problem_inputs(selected_indices, replacement_input, expected_values)
         st.error(f"Gagal replace input: {e}")
         return False
 
-def get_default_gemini_api_key():
+def get_gemini_api_key_from_secrets():
     try:
         if "GEMINI_API_KEY" in st.secrets:
-            return st.secrets["GEMINI_API_KEY"]
-        if "gemini" in st.secrets and "api_key" in st.secrets["gemini"]:
-            return st.secrets["gemini"]["api_key"]
+            return str(st.secrets["GEMINI_API_KEY"]).strip()
     except Exception:
         pass
-    return os.environ.get("GEMINI_API_KEY", "")
+    return os.environ.get("GEMINI_API_KEY", "").strip()
 
 def get_clean_done_examples(data, limit=24):
     prepared_data = prepare_sheet_data(data)
@@ -579,13 +577,11 @@ if can_manage_synthetic_data:
 
         clean_examples = get_clean_done_examples(df)
         st.caption(f"Data Done bersih yang tersedia untuk dipelajari Gemini: {len(clean_examples)} contoh.")
-        default_gemini_key = get_default_gemini_api_key()
-        gemini_api_key = st.text_input(
-            "Gemini API key",
-            value=default_gemini_key,
-            type="password",
-            help="Bisa juga disimpan sebagai GEMINI_API_KEY di Streamlit secrets atau environment.",
-        )
+        gemini_api_key = get_gemini_api_key_from_secrets()
+        if gemini_api_key:
+            st.success("Gemini API key ditemukan dari secret GEMINI_API_KEY.")
+        else:
+            st.warning("Gemini API key belum ditemukan. Tambahkan GEMINI_API_KEY di Streamlit secrets.")
 
         learn_col1, learn_col2 = st.columns(2)
         with learn_col1:
