@@ -7,6 +7,7 @@ import plotly.express as px
 import os
 import requests
 from difflib import SequenceMatcher
+import re
 import time
 from auth_config import AUTHORIZED_USERS, ADMIN_CREDENTIALS, AUTHORIZED_ADMINS, REPLACEMENT_ADMINS, SYNTHETIC_DATA_ADMINS
 from sheet_lock import get_sheet_write_lock
@@ -25,6 +26,7 @@ LENGTH_LIMIT_COLUMNS = ['instruction_ats', 'output_ats']
 PROBLEM_KEYWORDS_LABEL = "sama, serupa, double, seperti sebelumnya, atau terlalu banyak"
 PROBLEM_PATTERN = r"\b(?:sama|serupa|double)\b|seperti\s+sebelumnya|terlalu\s+banyak"
 SYNTHETIC_SIMILARITY_THRESHOLD = 0.86
+SYNTHETIC_CASE_ID_PATTERN = re.compile(r"^ATS-SYN-(\d+)$")
 
 def normalize_cell(value):
     if pd.isna(value):
@@ -343,6 +345,24 @@ def get_clean_done_examples(data, limit=40):
     if len(examples) > limit:
         examples = examples.sample(n=limit, random_state=20260518)
     return examples[["input", "instruction_ats", "output_ats"]].to_dict("records")
+
+def get_next_synthetic_start_number(data):
+    if data is None or data.empty or "synthetic_case_id" not in data.columns:
+        return 1
+
+    max_number = 0
+    for value in data["synthetic_case_id"].fillna("").astype(str).str.strip():
+        match = SYNTHETIC_CASE_ID_PATTERN.match(value)
+        if match:
+            max_number = max(max_number, int(match.group(1)))
+    return max_number + 1
+
+def make_synthetic_draft(existing_data, learning_notes=""):
+    return generate_synthetic_ats_cases(
+        total_cases=700,
+        learning_notes=learning_notes,
+        start_number=get_next_synthetic_start_number(existing_data),
+    )
 
 def learn_existing_ats_style_with_gemini(examples, api_key):
     if not api_key:
@@ -750,7 +770,7 @@ except Exception as e:
 # --- DATA SINTETIS ATS ---
 if can_manage_synthetic_data:
     if "synthetic_ats_draft" not in st.session_state:
-        st.session_state["synthetic_ats_draft"] = generate_synthetic_ats_cases(total_cases=700)
+        st.session_state["synthetic_ats_draft"] = make_synthetic_draft(df)
     if "synthetic_learning_notes" not in st.session_state:
         st.session_state["synthetic_learning_notes"] = ""
     if "synthetic_similarity_result" not in st.session_state:
@@ -782,10 +802,7 @@ if can_manage_synthetic_data:
                         gemini_api_key,
                     )
                     st.session_state["synthetic_learning_notes"] = learned_notes
-                    st.session_state["synthetic_ats_draft"] = generate_synthetic_ats_cases(
-                        total_cases=700,
-                        learning_notes=learned_notes,
-                    )
+                    st.session_state["synthetic_ats_draft"] = make_synthetic_draft(df, learned_notes)
                     st.session_state["synthetic_similarity_result"] = None
                     st.session_state["synthetic_gemini_similarity_review"] = None
                     st.success("Gemini selesai mempelajari pola data Done yang bersih.")
@@ -798,9 +815,9 @@ if can_manage_synthetic_data:
                 use_container_width=True,
                 disabled=not st.session_state["synthetic_learning_notes"],
             ):
-                st.session_state["synthetic_ats_draft"] = generate_synthetic_ats_cases(
-                    total_cases=700,
-                    learning_notes=st.session_state["synthetic_learning_notes"],
+                st.session_state["synthetic_ats_draft"] = make_synthetic_draft(
+                    df,
+                    st.session_state["synthetic_learning_notes"],
                 )
                 st.session_state["synthetic_similarity_result"] = None
                 st.session_state["synthetic_gemini_similarity_review"] = None
@@ -863,7 +880,14 @@ if can_manage_synthetic_data:
             key=f"synthetic_output_{selected_case_id}",
         )
 
-        edit_col1, edit_col2 = st.columns(2)
+        current_draft_start = get_next_synthetic_start_number(synthetic_preview) - len(synthetic_preview)
+        current_draft_next_start = get_next_synthetic_start_number(synthetic_preview)
+        st.caption(
+            f"Rentang ID draft saat ini: ATS-SYN-{current_draft_start:04d} "
+            f"sampai ATS-SYN-{current_draft_next_start - 1:04d}."
+        )
+
+        edit_col1, edit_col2, edit_col3 = st.columns(3)
         with edit_col1:
             if st.button("Simpan Perubahan Data Ini", use_container_width=True):
                 st.session_state["synthetic_ats_draft"].at[selected_index, "input"] = edited_input.strip()
@@ -876,13 +900,24 @@ if can_manage_synthetic_data:
                 st.rerun()
         with edit_col2:
             if st.button("Reset Semua Draft Sintetis", use_container_width=True):
-                st.session_state["synthetic_ats_draft"] = generate_synthetic_ats_cases(
-                    total_cases=700,
-                    learning_notes=st.session_state["synthetic_learning_notes"],
+                st.session_state["synthetic_ats_draft"] = make_synthetic_draft(
+                    df,
+                    st.session_state["synthetic_learning_notes"],
                 )
                 st.session_state["synthetic_similarity_result"] = None
                 st.session_state["synthetic_gemini_similarity_review"] = None
                 st.success("Draft data sintetis dikembalikan ke versi awal.")
+                st.rerun()
+        with edit_col3:
+            if st.button("Buat Draft 700 Data Berikutnya", use_container_width=True):
+                st.session_state["synthetic_ats_draft"] = generate_synthetic_ats_cases(
+                    total_cases=700,
+                    learning_notes=st.session_state["synthetic_learning_notes"],
+                    start_number=current_draft_next_start,
+                )
+                st.session_state["synthetic_similarity_result"] = None
+                st.session_state["synthetic_gemini_similarity_review"] = None
+                st.success("Draft 700 data berikutnya dibuat dengan ID lanjutan.")
                 st.rerun()
 
         st.dataframe(
@@ -1037,6 +1072,7 @@ if can_manage_synthetic_data:
                     st.session_state["synthetic_ats_draft"] = generate_synthetic_ats_cases(
                         total_cases=700,
                         learning_notes=st.session_state["synthetic_learning_notes"],
+                        start_number=current_draft_next_start,
                     )
                     st.rerun()
                 else:

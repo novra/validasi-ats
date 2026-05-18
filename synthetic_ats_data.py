@@ -252,14 +252,14 @@ def build_case_narrative(case_id, gender, age, complaint, duration, clinical_sig
     )
 
 
-def generate_synthetic_ats_cases(total_cases=700, seed=20260518, learning_notes=""):
+def generate_synthetic_ats_cases(total_cases=700, seed=20260518, learning_notes="", start_number=1):
     if total_cases % len(ATS_LEVELS) != 0:
         raise ValueError("total_cases harus habis dibagi 5 agar level ATS seimbang.")
 
     rng = random.Random(seed)
     cases_per_level = total_cases // len(ATS_LEVELS)
     rows = []
-    global_number = 1
+    global_number = start_number
 
     for level_key, level_color, ats_category in ATS_LEVELS:
         scenarios = LEVEL_SCENARIOS[level_key]
