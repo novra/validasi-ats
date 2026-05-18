@@ -327,7 +327,7 @@ def get_gemini_api_key_from_secrets():
         pass
     return os.environ.get("GEMINI_API_KEY", "").strip()
 
-def get_clean_done_examples(data, limit=24):
+def get_clean_done_examples(data, limit=40):
     prepared_data = prepare_sheet_data(data)
     clean_mask = (
         (prepared_data["status"] == "Done")
@@ -337,7 +337,9 @@ def get_clean_done_examples(data, limit=24):
         & ~prepared_data["instruction_ats"].str.contains(PROBLEM_PATTERN, case=False, na=False, regex=True)
         & ~prepared_data["output_ats"].str.contains(PROBLEM_PATTERN, case=False, na=False, regex=True)
     )
-    examples = prepared_data[clean_mask].head(limit)
+    examples = prepared_data[clean_mask].copy()
+    if len(examples) > limit:
+        examples = examples.sample(n=limit, random_state=20260518)
     return examples[["input", "instruction_ats", "output_ats"]].to_dict("records")
 
 def learn_existing_ats_style_with_gemini(examples, api_key):
@@ -349,18 +351,30 @@ def learn_existing_ats_style_with_gemini(examples, api_key):
     example_text = "\n\n".join(
         (
             f"Contoh {idx + 1}\n"
-            f"INPUT:\n{example['input'][:1200]}\n"
-            f"INSTRUCTION_ATS:\n{example['instruction_ats'][:1200]}\n"
+            f"INPUT:\n{example['input'][:1600]}\n"
+            f"INSTRUCTION_ATS:\n{example['instruction_ats'][:2400]}\n"
             f"OUTPUT_ATS:\n{example['output_ats'][:1200]}"
         )
         for idx, example in enumerate(examples)
     )
     prompt = (
-        "Pelajari pola data pelabelan ATS berikut. Buat ringkasan gaya penulisan yang aman untuk dipakai "
-        "sebagai panduan membuat data sintetis baru. Jangan menyalin data pasien secara verbatim. "
-        "Fokus pada struktur konteks, tingkat detail klinis, format instruksi, format output, dan istilah triase.\n\n"
+        "Anda adalah analis data triase ATS. Pelajari pola data pelabelan ATS berikut untuk membuat panduan "
+        "pembuatan data sintetis baru. Prioritas utama adalah mempelajari cara pengisian INSTRUCTION_ATS. "
+        "Jangan menyalin data pasien secara verbatim dan jangan membuat kasus baru di jawaban ini.\n\n"
         f"{example_text}\n\n"
-        "Kembalikan ringkasan singkat dalam bahasa Indonesia, maksimal 10 bullet."
+        "Kembalikan panduan dalam bahasa Indonesia dengan format persis berikut:\n"
+        "POLA_KONTEKS:\n"
+        "- jelaskan pola konteks yang terlihat di instruction_ats existing, termasuk detail klinis yang wajib ada.\n\n"
+        "POLA_PENGETAHUAN:\n"
+        "- jelaskan cara pengetahuan ATS ditulis, istilah yang sering dipakai, dan tingkat detailnya.\n\n"
+        "POLA_INTERVENSI_IGD:\n"
+        "- jelaskan pola intervensi penyelamatan nyawa/penanganan IGD yang biasanya dicantumkan.\n\n"
+        "POLA_INSTRUKSI:\n"
+        "- jelaskan gaya kalimat instruksi, cara meminta klasifikasi, dan batasan jawaban.\n\n"
+        "POLA_OUTPUT:\n"
+        "- jelaskan format output_ats existing untuk analisis dan kesimpulan.\n\n"
+        "ATURAN_GENERASI:\n"
+        "- tulis 6 sampai 10 aturan praktis agar synthetic instruction_ats mirip gaya data Done existing."
     )
     response = requests.post(
         "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
@@ -372,7 +386,7 @@ def learn_existing_ats_style_with_gemini(examples, api_key):
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {
                 "temperature": 0.2,
-                "maxOutputTokens": 900,
+                "maxOutputTokens": 1600,
             },
         },
         timeout=45,

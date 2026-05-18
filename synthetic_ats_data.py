@@ -37,6 +37,27 @@ ATS_CONCLUSIONS = {
     "white": "Kesimpulan: ATS 5/Putih karena keluhan ringan/non-urgent, tanda vital stabil, dan tidak ada indikasi kegawatan akut.",
 }
 
+NARRATIVE_OPENINGS = [
+    "Pasien datang ke IGD diantar keluarga.",
+    "Pasien tiba di ruang triase IGD dengan bantuan petugas.",
+    "Pasien dibawa ke IGD setelah keluhan dirasakan semakin mengganggu.",
+    "Pasien masuk ke IGD dan segera dilakukan penilaian awal oleh perawat triase.",
+]
+
+NARRATIVE_PROGRESSIONS = [
+    "Menurut keluarga, keluhan muncul mendadak dan tampak lebih berat dibanding kondisi biasanya.",
+    "Pasien menyampaikan keluhan bertambah jelas selama perjalanan menuju rumah sakit.",
+    "Sebelum tiba di IGD, pasien sempat beristirahat di rumah namun keluhan tidak membaik.",
+    "Keluarga mengatakan pasien tampak lebih lemah dan membutuhkan bantuan untuk mobilisasi.",
+]
+
+NARRATIVE_OBSERVATIONS = [
+    "Saat triase, pasien tampak tidak nyaman dan membutuhkan pemantauan tanda vital.",
+    "Pada pemeriksaan awal, petugas menilai kesadaran, jalan napas, pernapasan, sirkulasi, dan derajat nyeri.",
+    "Kondisi umum pasien dinilai dari respons bicara, warna kulit, pola napas, dan kemampuan mengikuti instruksi.",
+    "Petugas melakukan anamnesis singkat sambil memantau perubahan kondisi pasien.",
+]
+
 DEMOGRAPHICS = [
     ("Laki-laki", 2),
     ("Perempuan", 4),
@@ -114,17 +135,73 @@ LEVEL_SCENARIOS = {
 }
 
 
+def extract_learning_section(learning_notes, section_name):
+    if not learning_notes:
+        return ""
+
+    markers = [
+        "POLA_KONTEKS:",
+        "POLA_PENGETAHUAN:",
+        "POLA_INTERVENSI_IGD:",
+        "POLA_INSTRUKSI:",
+        "POLA_OUTPUT:",
+        "ATURAN_GENERASI:",
+    ]
+    start_marker = f"{section_name}:"
+    start_index = learning_notes.find(start_marker)
+    if start_index == -1:
+        return ""
+
+    content_start = start_index + len(start_marker)
+    content_end = len(learning_notes)
+    for marker in markers:
+        if marker == start_marker:
+            continue
+        marker_index = learning_notes.find(marker, content_start)
+        if marker_index != -1:
+            content_end = min(content_end, marker_index)
+
+    return learning_notes[content_start:content_end].strip()
+
+
 def build_instruction_ats(case_text, level_key, learning_notes=""):
-    notes = f"\n\nCatatan gaya dari data existing:\n{learning_notes.strip()}" if learning_notes else ""
+    context_style = extract_learning_section(learning_notes, "POLA_KONTEKS")
+    knowledge_style = extract_learning_section(learning_notes, "POLA_PENGETAHUAN")
+    intervention_style = extract_learning_section(learning_notes, "POLA_INTERVENSI_IGD")
+    instruction_style = extract_learning_section(learning_notes, "POLA_INSTRUKSI")
+    generation_rules = extract_learning_section(learning_notes, "ATURAN_GENERASI")
+
+    context_guidance = (
+        f"\n\nPola konteks dari data existing:\n{context_style}"
+        if context_style else ""
+    )
+    knowledge_guidance = (
+        f"\n\nPola pengetahuan dari data existing:\n{knowledge_style}"
+        if knowledge_style else ""
+    )
+    intervention_guidance = (
+        f"\n\nPola intervensi dari data existing:\n{intervention_style}"
+        if intervention_style else ""
+    )
+    instruction_guidance = (
+        f"\n\nPola instruksi dari data existing:\n{instruction_style}"
+        if instruction_style else ""
+    )
+    rules_guidance = (
+        f"\n\nAturan generasi dari data existing:\n{generation_rules}"
+        if generation_rules else ""
+    )
+
     return (
-        f"Konteks:\n{case_text}\n\n"
-        f"Pengetahuan:\n{ATS_KNOWLEDGE[level_key]}\n\n"
-        f"Intervensi penyelamatan nyawa segera yang umum di IGD:\n{ATS_INTERVENTIONS[level_key]}\n\n"
+        f"Konteks:\n{case_text}{context_guidance}\n\n"
+        f"Pengetahuan:\n{ATS_KNOWLEDGE[level_key]}{knowledge_guidance}\n\n"
+        f"Intervensi penyelamatan nyawa segera yang umum di IGD:\n{ATS_INTERVENTIONS[level_key]}{intervention_guidance}\n\n"
         "Instruksi:\n"
         "Tentukan level ATS yang paling tepat berdasarkan kondisi klinis, tanda vital, derajat kegawatan, "
         "risiko perburukan, kebutuhan waktu penanganan, dan kebutuhan intervensi segera. "
         "Berikan jawaban ringkas dan konsisten dengan format output ATS."
-        f"{notes}"
+        f"{instruction_guidance}"
+        f"{rules_guidance}"
     )
 
 
@@ -136,6 +213,37 @@ def build_output_ats(level_key, level_color, ats_category, complaint, clinical_s
         f"- Tanda vital: {vital_signs}.\n"
         f"- Interpretasi triase: kondisi paling sesuai dengan {ats_category}/{level_color}.\n\n"
         f"{ATS_CONCLUSIONS[level_key]}"
+    )
+
+
+def build_case_narrative(case_id, gender, age, complaint, duration, clinical_signs, vital_signs, comorbidity, rng):
+    opening = rng.choice(NARRATIVE_OPENINGS)
+    progression = rng.choice(NARRATIVE_PROGRESSIONS)
+    observation = rng.choice(NARRATIVE_OBSERVATIONS)
+    pain_scale = rng.choice(["2/10", "4/10", "6/10", "8/10", "9/10"])
+    intake = rng.choice([
+        "makan dan minum masih cukup",
+        "asupan makan menurun sejak keluhan memberat",
+        "minum masih bisa tetapi lebih sedikit dari biasanya",
+        "belum makan sejak keluhan muncul",
+    ])
+    prior_action = rng.choice([
+        "Belum ada obat yang diminum sebelum datang ke IGD.",
+        "Pasien sempat minum obat bebas di rumah namun keluhan belum membaik.",
+        "Keluarga hanya melakukan observasi di rumah sebelum memutuskan ke IGD.",
+        "Pasien langsung dibawa ke IGD karena keluarga khawatir dengan perubahan kondisinya.",
+    ])
+
+    return (
+        f"ID Kasus: {case_id}\n\n"
+        f"{opening} Pasien {gender}, {age} tahun, datang dengan keluhan utama {complaint}. "
+        f"Keluhan dirasakan {duration}. {progression} {prior_action}\n\n"
+        f"Pada anamnesis singkat, pasien/keluarga menjelaskan bahwa keluhan tersebut disertai temuan awal berupa "
+        f"{clinical_signs}. Skala nyeri atau ketidaknyamanan saat triase diperkirakan {pain_scale}. "
+        f"Riwayat yang diketahui: {comorbidity}. Untuk kebutuhan dasar, {intake}.\n\n"
+        f"{observation} Tanda vital saat masuk: {vital_signs}. "
+        f"Data ini merupakan catatan awal triase dan perlu digunakan untuk menentukan prioritas ATS berdasarkan "
+        f"derajat kegawatan, risiko perburukan, stabilitas tanda vital, serta kebutuhan intervensi segera di IGD."
     )
 
 
@@ -173,11 +281,16 @@ def generate_synthetic_ats_cases(total_cases=700, seed=20260518, learning_notes=
                 "tidak diketahui riwayat penyakit sebelumnya",
             ])
             case_id = f"{SYNTHETIC_CASE_PREFIX}-{global_number:04d}"
-            case_text = (
-                f"ID Kasus: {case_id}\n"
-                f"Pasien {gender}, {age} tahun, datang ke IGD dengan keluhan {complaint}. "
-                f"Keluhan berlangsung {duration}. Pemeriksaan awal: {clinical_signs}. "
-                f"Tanda vital: {vital_signs}. Riwayat: {comorbidity}."
+            case_text = build_case_narrative(
+                case_id,
+                gender,
+                age,
+                complaint,
+                duration,
+                clinical_signs,
+                vital_signs,
+                comorbidity,
+                rng,
             )
             rows.append(
                 {
