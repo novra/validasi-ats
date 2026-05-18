@@ -372,6 +372,55 @@ def make_input_only_synthetic_draft(existing_data):
     draft["status"] = ""
     return draft
 
+def remove_existing_synthetic_rows(draft, existing_data):
+    if draft is None or draft.empty:
+        return draft
+
+    latest_data = prepare_sheet_data(existing_data)
+    existing_ids = set()
+    if "synthetic_case_id" in latest_data.columns:
+        existing_ids = set(
+            latest_data["synthetic_case_id"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+    existing_inputs = set(
+        latest_data["input"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+
+    cleaned_draft = draft.copy()
+    cleaned_draft["synthetic_case_id"] = cleaned_draft["synthetic_case_id"].fillna("").astype(str).str.strip()
+    cleaned_draft["input"] = cleaned_draft["input"].fillna("").astype(str).str.strip()
+    return cleaned_draft[
+        ~cleaned_draft["synthetic_case_id"].isin(existing_ids)
+        & ~cleaned_draft["input"].isin(existing_inputs)
+    ].copy()
+
+def refill_synthetic_draft_to_700(draft, existing_data, learning_notes="", input_only=False):
+    cleaned_draft = remove_existing_synthetic_rows(draft, existing_data)
+    next_start = max(
+        get_next_synthetic_start_number(existing_data),
+        get_next_synthetic_start_number(cleaned_draft),
+    )
+
+    if len(cleaned_draft) != len(draft) or len(cleaned_draft) != 700:
+        cleaned_draft = generate_synthetic_ats_cases(
+            total_cases=700,
+            learning_notes=learning_notes,
+            start_number=next_start,
+        )
+        if input_only:
+            cleaned_draft["instruction_ats"] = ""
+            cleaned_draft["output_ats"] = ""
+            cleaned_draft["validator"] = ""
+            cleaned_draft["status"] = ""
+
+    return cleaned_draft.head(700).reset_index(drop=True)
+
 def learn_existing_ats_style_with_gemini(examples, api_key):
     if not api_key:
         raise ValueError("API key Gemini belum diisi.")
@@ -431,6 +480,84 @@ def learn_existing_ats_style_with_gemini(examples, api_key):
     if not learned_text:
         raise ValueError("Hasil pembelajaran Gemini kosong.")
     return learned_text
+
+def diversify_input_only_with_gemini(draft, api_key, batch_size=20):
+    if not api_key:
+        raise ValueError("API key Gemini belum ditemukan dari secret GEMINI_API_KEY.")
+
+    varied_rows = []
+    draft = draft.copy()
+    for start_index in range(0, len(draft), batch_size):
+        batch = draft.iloc[start_index:start_index + batch_size].copy()
+        case_text = "\n\n".join(
+            (
+                f"ID: {row['synthetic_case_id']}\n"
+                f"Level target: {row['synthetic_ats_level']} / {row['synthetic_ats_category']}\n"
+                f"Narasi awal:\n{row['input'][:1400]}"
+            )
+            for _, row in batch.iterrows()
+        )
+        prompt = (
+            "Anda membantu membuat data sintetis input triase IGD berbahasa Indonesia. "
+            "Tulis ulang setiap narasi agar variasi kasus tinggi, natural, gamblang, dan cukup detail. "
+            "Pertahankan level target ATS, tingkat kegawatan, dan tanda vital utama. "
+            "Jangan isi instruction_ats/output_ats/validator/status. Jangan menyalin narasi awal secara verbatim. "
+            "Variasikan kronologi, pilihan kata, gejala penyerta, riwayat, cara datang, dan observasi triase.\n\n"
+            f"{case_text}\n\n"
+            "Kembalikan hanya dengan format:\n"
+            "ID: ATS-SYN-xxxx\n"
+            "INPUT: narasi baru satu paragraf atau beberapa paragraf pendek\n\n"
+            "Ulangi untuk semua ID, jangan tambah ID baru."
+        )
+        response = requests.post(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+            headers={
+                "x-goog-api-key": api_key,
+                "Content-Type": "application/json",
+            },
+            json={
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "temperature": 0.85,
+                    "maxOutputTokens": 7000,
+                },
+            },
+            timeout=90,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        parts = payload.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+        result_text = "\n".join(part.get("text", "") for part in parts).strip()
+
+        parsed_inputs = {}
+        current_id = None
+        current_lines = []
+        for line in result_text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("ID:"):
+                if current_id and current_lines:
+                    parsed_inputs[current_id] = "\n".join(current_lines).strip()
+                current_id = stripped.replace("ID:", "", 1).strip()
+                current_lines = []
+            elif stripped.startswith("INPUT:"):
+                current_lines.append(stripped.replace("INPUT:", "", 1).strip())
+            elif current_id:
+                current_lines.append(line)
+        if current_id and current_lines:
+            parsed_inputs[current_id] = "\n".join(current_lines).strip()
+
+        for _, row in batch.iterrows():
+            row_copy = row.copy()
+            varied_input = parsed_inputs.get(row["synthetic_case_id"], "").strip()
+            if varied_input:
+                row_copy["input"] = varied_input
+            row_copy["instruction_ats"] = ""
+            row_copy["output_ats"] = ""
+            row_copy["validator"] = ""
+            row_copy["status"] = ""
+            varied_rows.append(row_copy)
+
+    return pd.DataFrame(varied_rows).reset_index(drop=True)
 
 def normalize_similarity_text(value):
     return " ".join(normalize_cell(value).lower().split())
@@ -819,6 +946,17 @@ if can_manage_synthetic_data:
     if "synthetic_input_only_similarity_result" not in st.session_state:
         st.session_state["synthetic_input_only_similarity_result"] = None
 
+    st.session_state["synthetic_ats_draft"] = refill_synthetic_draft_to_700(
+        st.session_state["synthetic_ats_draft"],
+        df,
+        st.session_state["synthetic_learning_notes"],
+    )
+    st.session_state["synthetic_input_only_draft"] = refill_synthetic_draft_to_700(
+        st.session_state["synthetic_input_only_draft"],
+        df,
+        input_only=True,
+    )
+
     synthetic_preview = st.session_state["synthetic_ats_draft"].copy()
     full_tab, input_only_tab = st.tabs(["Data Sintetis Lengkap", "Input Saja"])
     with full_tab:
@@ -1194,6 +1332,25 @@ if can_manage_synthetic_data:
                 st.session_state["synthetic_input_only_similarity_result"] = None
                 st.success("Draft 700 input berikutnya dibuat dengan ID lanjutan.")
                 st.rerun()
+
+        gemini_input_col1, gemini_input_col2 = st.columns([1, 2])
+        with gemini_input_col1:
+            if st.button("Tingkatkan Variasi Input dengan Gemini", use_container_width=True):
+                try:
+                    st.session_state["synthetic_input_only_draft"] = diversify_input_only_with_gemini(
+                        st.session_state["synthetic_input_only_draft"],
+                        gemini_api_key,
+                    )
+                    st.session_state["synthetic_input_only_similarity_result"] = None
+                    st.success("Variasi narasi input berhasil ditingkatkan dengan Gemini.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Gagal meningkatkan variasi input dengan Gemini: {e}")
+        with gemini_input_col2:
+            st.caption(
+                "Gemini akan menulis ulang narasi input agar variasinya lebih tinggi, "
+                "tetap mempertahankan level ATS target dan membiarkan kolom lain kosong."
+            )
 
         st.dataframe(
             input_only_preview[
