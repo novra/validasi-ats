@@ -4,9 +4,12 @@ from io import BytesIO
 from streamlit_gsheets import GSheetsConnection
 import plotly.graph_objects as go
 import plotly.express as px
+import os
+import requests
 import time
-from auth_config import AUTHORIZED_USERS, ADMIN_CREDENTIALS, AUTHORIZED_ADMINS, REPLACEMENT_ADMINS
+from auth_config import AUTHORIZED_USERS, ADMIN_CREDENTIALS, AUTHORIZED_ADMINS, REPLACEMENT_ADMINS, SYNTHETIC_DATA_ADMINS
 from sheet_lock import get_sheet_write_lock
+from synthetic_ats_data import generate_synthetic_ats_cases, get_synthetic_balance_summary
 
 # --- KONFIGURASI HALAMAN ---
 st.set_page_config(layout="wide", page_title="Admin Monitoring Pelabelan")
@@ -316,6 +319,153 @@ def replace_problem_inputs(selected_indices, replacement_input, expected_values)
         st.error(f"Gagal replace input: {e}")
         return False
 
+def get_default_gemini_api_key():
+    try:
+        if "GEMINI_API_KEY" in st.secrets:
+            return st.secrets["GEMINI_API_KEY"]
+        if "gemini" in st.secrets and "api_key" in st.secrets["gemini"]:
+            return st.secrets["gemini"]["api_key"]
+    except Exception:
+        pass
+    return os.environ.get("GEMINI_API_KEY", "")
+
+def get_clean_done_examples(data, limit=24):
+    prepared_data = prepare_sheet_data(data)
+    clean_mask = (
+        (prepared_data["status"] == "Done")
+        & (prepared_data["input"] != "")
+        & (prepared_data["instruction_ats"] != "")
+        & (prepared_data["output_ats"] != "")
+        & ~prepared_data["instruction_ats"].str.contains(PROBLEM_PATTERN, case=False, na=False, regex=True)
+        & ~prepared_data["output_ats"].str.contains(PROBLEM_PATTERN, case=False, na=False, regex=True)
+    )
+    examples = prepared_data[clean_mask].head(limit)
+    return examples[["input", "instruction_ats", "output_ats"]].to_dict("records")
+
+def learn_existing_ats_style_with_gemini(examples, api_key):
+    if not api_key:
+        raise ValueError("API key Gemini belum diisi.")
+    if not examples:
+        raise ValueError("Tidak ada data Done yang bersih untuk dipelajari.")
+
+    example_text = "\n\n".join(
+        (
+            f"Contoh {idx + 1}\n"
+            f"INPUT:\n{example['input'][:1200]}\n"
+            f"INSTRUCTION_ATS:\n{example['instruction_ats'][:1200]}\n"
+            f"OUTPUT_ATS:\n{example['output_ats'][:1200]}"
+        )
+        for idx, example in enumerate(examples)
+    )
+    prompt = (
+        "Pelajari pola data pelabelan ATS berikut. Buat ringkasan gaya penulisan yang aman untuk dipakai "
+        "sebagai panduan membuat data sintetis baru. Jangan menyalin data pasien secara verbatim. "
+        "Fokus pada struktur konteks, tingkat detail klinis, format instruksi, format output, dan istilah triase.\n\n"
+        f"{example_text}\n\n"
+        "Kembalikan ringkasan singkat dalam bahasa Indonesia, maksimal 10 bullet."
+    )
+    response = requests.post(
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+        headers={
+            "x-goog-api-key": api_key,
+            "Content-Type": "application/json",
+        },
+        json={
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0.2,
+                "maxOutputTokens": 900,
+            },
+        },
+        timeout=45,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    candidates = payload.get("candidates", [])
+    if not candidates:
+        raise ValueError("Gemini tidak mengembalikan hasil pembelajaran.")
+    parts = candidates[0].get("content", {}).get("parts", [])
+    learned_text = "\n".join(part.get("text", "") for part in parts).strip()
+    if not learned_text:
+        raise ValueError("Hasil pembelajaran Gemini kosong.")
+    return learned_text
+
+def append_synthetic_ats_cases(total_cases=700, synthetic_data=None, status_value="Done"):
+    try:
+        with get_sheet_write_lock():
+            latest_df, latest_error = read_sheet_with_retry()
+            if latest_df is None or latest_df.empty:
+                if latest_error:
+                    st.error(f"Tambah data sintetis dibatalkan: Google Sheet tidak dapat dibaca ({latest_error}).")
+                else:
+                    st.error("Tambah data sintetis dibatalkan: Google Sheet kosong atau tidak dapat dibaca.")
+                return 0, 0
+
+            latest_data = prepare_sheet_data(latest_df)
+            if synthetic_data is None:
+                synthetic_data = generate_synthetic_ats_cases(total_cases=total_cases)
+            else:
+                synthetic_data = synthetic_data.copy()
+
+            for col in ['instruction_ats', 'input', 'output_ats', 'validator', 'status']:
+                if col not in synthetic_data.columns:
+                    synthetic_data[col] = ""
+            synthetic_data['input'] = synthetic_data['input'].fillna('').astype(str).str.strip()
+            synthetic_data = synthetic_data[synthetic_data['input'] != ''].copy()
+            if synthetic_data.empty:
+                st.error("Tambah data sintetis dibatalkan: tidak ada input sintetis yang terisi.")
+                return 0, len(latest_data)
+
+            synthetic_data["validator"] = "sintetis"
+            synthetic_data["status"] = status_value
+
+            if "synthetic_case_id" not in latest_data.columns:
+                latest_data["synthetic_case_id"] = ""
+            for col in synthetic_data.columns:
+                if col not in latest_data.columns:
+                    latest_data[col] = ""
+
+            existing_ids = set(
+                latest_data["synthetic_case_id"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+            )
+            existing_inputs = set(
+                latest_data["input"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+            )
+
+            updated_count = 0
+            append_rows = []
+            latest_ids = latest_data["synthetic_case_id"].fillna("").astype(str).str.strip()
+            for _, row in synthetic_data.iterrows():
+                synthetic_id = str(row.get("synthetic_case_id", "")).strip()
+                input_value = str(row.get("input", "")).strip()
+                if synthetic_id and synthetic_id in existing_ids:
+                    row_index = latest_ids[latest_ids == synthetic_id].index[0]
+                    for col in synthetic_data.columns:
+                        latest_data.at[row_index, col] = row.get(col, "")
+                    updated_count += 1
+                elif input_value not in existing_inputs:
+                    append_rows.append(row)
+
+            missing_data = pd.DataFrame(append_rows)
+            if missing_data.empty and updated_count == 0:
+                return 0, len(latest_data)
+
+            updated_data = pd.concat([latest_data, missing_data], ignore_index=True, sort=False).fillna("")
+            updated_data = prepare_sheet_data(updated_data)
+            conn.update(worksheet="Sheet1", data=updated_data)
+            st.session_state['admin_loaded_sheet_rows'] = len(updated_data)
+            remember_loaded_sheet(updated_data)
+            return len(missing_data) + updated_count, len(updated_data)
+    except Exception as e:
+        st.error(f"Gagal menambahkan data sintetis ke Google Sheet: {e}")
+        return 0, 0
+
 # --- LOGIN ADMIN ---
 if not st.session_state.get('admin_logged_in', False):
     st.title("🔐 Admin Monitoring Panel")
@@ -367,10 +517,16 @@ with col2:
 st.sidebar.divider()
 admin_username = st.session_state.get('admin_username', 'admin')
 can_replace_input = admin_username in REPLACEMENT_ADMINS
+can_manage_synthetic_data = admin_username in SYNTHETIC_DATA_ADMINS
+is_synthetic_only_admin = can_manage_synthetic_data and admin_username not in REPLACEMENT_ADMINS and admin_username != "admin"
 st.sidebar.caption(f"Admin aktif: {admin_username}")
 
-st.title("📊 Admin Monitoring Panel - Pelabelan ATS")
-st.markdown("Dashboard monitoring progress pelabelan masing-masing user")
+if is_synthetic_only_admin:
+    st.title("Tambah Data Sintetis ATS")
+    st.markdown("Akun ini hanya dapat menambahkan data sintetis seimbang ke Google Sheet.")
+else:
+    st.title("📊 Admin Monitoring Panel - Pelabelan ATS")
+    st.markdown("Dashboard monitoring progress pelabelan masing-masing user")
 
 # --- LOAD DATA ---
 try:
@@ -405,6 +561,206 @@ try:
     
 except Exception as e:
     st.error(f"Gagal memuat data: {e}")
+    st.stop()
+
+# --- DATA SINTETIS ATS ---
+if can_manage_synthetic_data:
+    if "synthetic_ats_draft" not in st.session_state:
+        st.session_state["synthetic_ats_draft"] = generate_synthetic_ats_cases(total_cases=700)
+    if "synthetic_learning_notes" not in st.session_state:
+        st.session_state["synthetic_learning_notes"] = ""
+
+    synthetic_preview = st.session_state["synthetic_ats_draft"].copy()
+    with st.expander("Tambah 700 data sintetis ATS seimbang", expanded=is_synthetic_only_admin):
+        st.caption(
+            "Akan membuat 140 kasus untuk tiap level: merah, orange, hijau, biru, dan putih. "
+            "Kolom instruction_ats, output_ats, validator, dan status ikut disiapkan sebelum disimpan."
+        )
+
+        clean_examples = get_clean_done_examples(df)
+        st.caption(f"Data Done bersih yang tersedia untuk dipelajari Gemini: {len(clean_examples)} contoh.")
+        default_gemini_key = get_default_gemini_api_key()
+        gemini_api_key = st.text_input(
+            "Gemini API key",
+            value=default_gemini_key,
+            type="password",
+            help="Bisa juga disimpan sebagai GEMINI_API_KEY di Streamlit secrets atau environment.",
+        )
+
+        learn_col1, learn_col2 = st.columns(2)
+        with learn_col1:
+            if st.button("Pelajari Data Existing dengan Gemini", use_container_width=True):
+                try:
+                    learned_notes = learn_existing_ats_style_with_gemini(
+                        clean_examples,
+                        gemini_api_key,
+                    )
+                    st.session_state["synthetic_learning_notes"] = learned_notes
+                    st.session_state["synthetic_ats_draft"] = generate_synthetic_ats_cases(
+                        total_cases=700,
+                        learning_notes=learned_notes,
+                    )
+                    st.success("Gemini selesai mempelajari pola data Done yang bersih.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Gagal mempelajari data existing dengan Gemini: {e}")
+        with learn_col2:
+            if st.button(
+                "Generate Ulang Draft dari Hasil Belajar",
+                use_container_width=True,
+                disabled=not st.session_state["synthetic_learning_notes"],
+            ):
+                st.session_state["synthetic_ats_draft"] = generate_synthetic_ats_cases(
+                    total_cases=700,
+                    learning_notes=st.session_state["synthetic_learning_notes"],
+                )
+                st.success("Draft sintetis dibuat ulang dari hasil pembelajaran.")
+                st.rerun()
+
+        if st.session_state["synthetic_learning_notes"]:
+            st.text_area(
+                "Ringkasan pembelajaran Gemini",
+                value=st.session_state["synthetic_learning_notes"],
+                height=180,
+            )
+        else:
+            st.info("Jalankan pembelajaran Gemini terlebih dahulu agar draft mengikuti pola data Done existing.")
+
+        st.dataframe(
+            get_synthetic_balance_summary(synthetic_preview),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        existing_synthetic_count = 0
+        if "synthetic_case_id" in df.columns:
+            existing_synthetic_count = df["synthetic_case_id"].fillna("").astype(str).str.strip().ne("").sum()
+        st.caption(f"Data sintetis yang sudah terdeteksi di sheet saat ini: {existing_synthetic_count}")
+
+        st.markdown("#### Review dan edit data")
+        case_options = synthetic_preview["synthetic_case_id"].tolist()
+        selected_case_id = st.selectbox(
+            "Pilih data sintetis",
+            options=case_options,
+            key="selected_synthetic_case_id",
+        )
+        selected_index = synthetic_preview.index[
+            synthetic_preview["synthetic_case_id"] == selected_case_id
+        ][0]
+        selected_row = synthetic_preview.loc[selected_index]
+
+        detail_col1, detail_col2, detail_col3 = st.columns(3)
+        detail_col1.metric("ID", selected_row["synthetic_case_id"])
+        detail_col2.metric("Level", selected_row["synthetic_ats_level"])
+        detail_col3.metric("Kategori", selected_row["synthetic_ats_category"])
+
+        edited_input = st.text_area(
+            "Input",
+            value=selected_row["input"],
+            height=220,
+            key=f"synthetic_input_{selected_case_id}",
+        )
+        edited_instruction = st.text_area(
+            "Instruction ATS",
+            value=selected_row["instruction_ats"],
+            height=260,
+            key=f"synthetic_instruction_{selected_case_id}",
+        )
+        edited_output = st.text_area(
+            "Output ATS",
+            value=selected_row["output_ats"],
+            height=220,
+            key=f"synthetic_output_{selected_case_id}",
+        )
+
+        edit_col1, edit_col2 = st.columns(2)
+        with edit_col1:
+            if st.button("Simpan Perubahan Data Ini", use_container_width=True):
+                st.session_state["synthetic_ats_draft"].at[selected_index, "input"] = edited_input.strip()
+                st.session_state["synthetic_ats_draft"].at[selected_index, "instruction_ats"] = edited_instruction.strip()
+                st.session_state["synthetic_ats_draft"].at[selected_index, "output_ats"] = edited_output.strip()
+                st.session_state["synthetic_ats_draft"].at[selected_index, "validator"] = "sintetis"
+                st.success(f"Perubahan {selected_case_id} disimpan di draft.")
+                st.rerun()
+        with edit_col2:
+            if st.button("Reset Semua Draft Sintetis", use_container_width=True):
+                st.session_state["synthetic_ats_draft"] = generate_synthetic_ats_cases(
+                    total_cases=700,
+                    learning_notes=st.session_state["synthetic_learning_notes"],
+                )
+                st.success("Draft data sintetis dikembalikan ke versi awal.")
+                st.rerun()
+
+        st.dataframe(
+            synthetic_preview[
+                [
+                    "synthetic_case_id",
+                    "synthetic_ats_level",
+                    "synthetic_ats_category",
+                    "validator",
+                    "status",
+                    "input",
+                    "instruction_ats",
+                    "output_ats",
+                ]
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        confirm_synthetic_append = st.checkbox(
+            "Saya sudah meninjau data sintetis dan yakin ingin menyimpannya ke Google Sheet.",
+            key="confirm_synthetic_append",
+        )
+        can_save_synthetic = confirm_synthetic_append and bool(st.session_state["synthetic_learning_notes"])
+        if confirm_synthetic_append and not st.session_state["synthetic_learning_notes"]:
+            st.warning("Jalankan pembelajaran Gemini terlebih dahulu sebelum menyimpan ke Google Sheet.")
+        save_progress_col, save_final_col = st.columns(2)
+        with save_progress_col:
+            if st.button(
+                "Simpan Progress ke Google Sheet",
+                use_container_width=True,
+                disabled=not can_save_synthetic,
+            ):
+                saved_count, total_rows_after = append_synthetic_ats_cases(
+                    total_cases=700,
+                    synthetic_data=st.session_state["synthetic_ats_draft"],
+                    status_value="Pending",
+                )
+                if saved_count:
+                    st.success(
+                        f"Progress {saved_count} data sintetis tersimpan. "
+                        f"Total baris sheet sekarang {total_rows_after}."
+                    )
+                    st.rerun()
+                else:
+                    st.info("Tidak ada data yang disimpan; semua ID/input sudah sama atau terduplikasi.")
+        with save_final_col:
+            if st.button(
+                "Simpan Final ke Google Sheet",
+                type="primary",
+                use_container_width=True,
+                disabled=not can_save_synthetic,
+            ):
+                saved_count, total_rows_after = append_synthetic_ats_cases(
+                    total_cases=700,
+                    synthetic_data=st.session_state["synthetic_ats_draft"],
+                    status_value="Done",
+                )
+                if saved_count:
+                    st.success(
+                        f"Final {saved_count} data sintetis tersimpan. "
+                        f"Total baris sheet sekarang {total_rows_after}."
+                    )
+                    st.session_state["synthetic_ats_draft"] = generate_synthetic_ats_cases(
+                        total_cases=700,
+                        learning_notes=st.session_state["synthetic_learning_notes"],
+                    )
+                    st.rerun()
+                else:
+                    st.info("Tidak ada data yang disimpan; semua ID/input sudah sama atau terduplikasi.")
+
+if is_synthetic_only_admin:
     st.stop()
 
 # --- KALKULASI STATISTIK ---
