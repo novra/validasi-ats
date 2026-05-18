@@ -364,6 +364,14 @@ def make_synthetic_draft(existing_data, learning_notes=""):
         start_number=get_next_synthetic_start_number(existing_data),
     )
 
+def make_input_only_synthetic_draft(existing_data):
+    draft = make_synthetic_draft(existing_data)
+    draft["instruction_ats"] = ""
+    draft["output_ats"] = ""
+    draft["validator"] = ""
+    draft["status"] = ""
+    return draft
+
 def learn_existing_ats_style_with_gemini(examples, api_key):
     if not api_key:
         raise ValueError("API key Gemini belum diisi.")
@@ -594,7 +602,13 @@ def adjudicate_similarity_with_gemini(similarity_result, api_key, max_pairs=12):
     has_problem = "WAJIB_SIMILARITY_BERMASALAH: YA" in result_text.upper()
     return result_text, has_problem
 
-def append_synthetic_ats_cases(total_cases=700, synthetic_data=None, status_value="Done"):
+def append_synthetic_ats_cases(
+    total_cases=700,
+    synthetic_data=None,
+    status_value="Done",
+    validator_value="sintetis",
+    input_only=False,
+):
     try:
         with get_sheet_write_lock():
             latest_df, latest_error = read_sheet_with_retry()
@@ -620,8 +634,14 @@ def append_synthetic_ats_cases(total_cases=700, synthetic_data=None, status_valu
                 st.error("Tambah data sintetis dibatalkan: tidak ada input sintetis yang terisi.")
                 return 0, len(latest_data)
 
-            synthetic_data["validator"] = "sintetis"
-            synthetic_data["status"] = status_value
+            if input_only:
+                synthetic_data["instruction_ats"] = ""
+                synthetic_data["output_ats"] = ""
+                synthetic_data["validator"] = ""
+                synthetic_data["status"] = ""
+            else:
+                synthetic_data["validator"] = validator_value
+                synthetic_data["status"] = status_value
 
             if "synthetic_case_id" not in latest_data.columns:
                 latest_data["synthetic_case_id"] = ""
@@ -645,16 +665,33 @@ def append_synthetic_ats_cases(total_cases=700, synthetic_data=None, status_valu
             updated_count = 0
             append_rows = []
             latest_ids = latest_data["synthetic_case_id"].fillna("").astype(str).str.strip()
+            protected_existing_rows = []
             for _, row in synthetic_data.iterrows():
                 synthetic_id = str(row.get("synthetic_case_id", "")).strip()
                 input_value = str(row.get("input", "")).strip()
                 if synthetic_id and synthetic_id in existing_ids:
+                    if input_only:
+                        continue
+
                     row_index = latest_ids[latest_ids == synthetic_id].index[0]
+                    current_validator = normalize_cell(latest_data.at[row_index, "validator"])
+                    if current_validator not in {"", "sintetis"}:
+                        protected_existing_rows.append(row_index + 1)
+                        continue
+
                     for col in synthetic_data.columns:
                         latest_data.at[row_index, col] = row.get(col, "")
                     updated_count += 1
                 elif input_value not in existing_inputs:
                     append_rows.append(row)
+
+            if protected_existing_rows:
+                rows = ", ".join(map(str, protected_existing_rows[:20]))
+                st.error(
+                    "Tambah data sintetis dibatalkan: ada synthetic_case_id yang sudah dipakai/dipegang user "
+                    f"pada baris {rows}. Buat draft batch berikutnya agar tidak menimpa pekerjaan user."
+                )
+                return 0, len(latest_data)
 
             missing_data = pd.DataFrame(append_rows)
             if missing_data.empty and updated_count == 0:
@@ -777,9 +814,15 @@ if can_manage_synthetic_data:
         st.session_state["synthetic_similarity_result"] = None
     if "synthetic_gemini_similarity_review" not in st.session_state:
         st.session_state["synthetic_gemini_similarity_review"] = None
+    if "synthetic_input_only_draft" not in st.session_state:
+        st.session_state["synthetic_input_only_draft"] = make_input_only_synthetic_draft(df)
+    if "synthetic_input_only_similarity_result" not in st.session_state:
+        st.session_state["synthetic_input_only_similarity_result"] = None
 
     synthetic_preview = st.session_state["synthetic_ats_draft"].copy()
-    with st.expander("Tambah 700 data sintetis ATS seimbang", expanded=is_synthetic_only_admin):
+    full_tab, input_only_tab = st.tabs(["Data Sintetis Lengkap", "Input Saja"])
+    with full_tab:
+      with st.expander("Tambah 700 data sintetis ATS seimbang", expanded=is_synthetic_only_admin):
         st.caption(
             "Akan membuat 140 kasus untuk tiap level: merah, orange, hijau, biru, dan putih. "
             "Kolom instruction_ats, output_ats, validator, dan status ikut disiapkan sebelum disimpan."
@@ -1077,6 +1120,174 @@ if can_manage_synthetic_data:
                     st.rerun()
                 else:
                     st.info("Tidak ada data yang disimpan; semua ID/input sudah sama atau terduplikasi.")
+
+    with input_only_tab:
+        input_only_preview = st.session_state["synthetic_input_only_draft"].copy()
+        st.caption(
+            "Mode ini hanya menambahkan kolom input. Kolom instruction_ats, output_ats, validator, "
+            "dan status akan dikosongkan agar data masuk ke pool pelabelan user."
+        )
+        st.dataframe(
+            get_synthetic_balance_summary(input_only_preview),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        input_only_start = get_next_synthetic_start_number(input_only_preview) - len(input_only_preview)
+        input_only_next_start = get_next_synthetic_start_number(input_only_preview)
+        st.caption(
+            f"Rentang ID draft input saja: ATS-SYN-{input_only_start:04d} "
+            f"sampai ATS-SYN-{input_only_next_start - 1:04d}."
+        )
+
+        input_only_case_options = input_only_preview["synthetic_case_id"].tolist()
+        selected_input_only_case_id = st.selectbox(
+            "Pilih data input sintetis",
+            options=input_only_case_options,
+            key="selected_input_only_synthetic_case_id",
+        )
+        selected_input_only_index = input_only_preview.index[
+            input_only_preview["synthetic_case_id"] == selected_input_only_case_id
+        ][0]
+        selected_input_only_row = input_only_preview.loc[selected_input_only_index]
+
+        input_only_detail_col1, input_only_detail_col2, input_only_detail_col3 = st.columns(3)
+        input_only_detail_col1.metric("ID", selected_input_only_row["synthetic_case_id"])
+        input_only_detail_col2.metric("Level", selected_input_only_row["synthetic_ats_level"])
+        input_only_detail_col3.metric("Kategori", selected_input_only_row["synthetic_ats_category"])
+
+        edited_input_only = st.text_area(
+            "Input",
+            value=selected_input_only_row["input"],
+            height=260,
+            key=f"synthetic_input_only_{selected_input_only_case_id}",
+        )
+
+        input_only_edit_col1, input_only_edit_col2, input_only_edit_col3 = st.columns(3)
+        with input_only_edit_col1:
+            if st.button("Simpan Perubahan Input Ini", use_container_width=True):
+                st.session_state["synthetic_input_only_draft"].at[selected_input_only_index, "input"] = edited_input_only.strip()
+                st.session_state["synthetic_input_only_draft"].at[selected_input_only_index, "instruction_ats"] = ""
+                st.session_state["synthetic_input_only_draft"].at[selected_input_only_index, "output_ats"] = ""
+                st.session_state["synthetic_input_only_draft"].at[selected_input_only_index, "validator"] = ""
+                st.session_state["synthetic_input_only_draft"].at[selected_input_only_index, "status"] = ""
+                st.session_state["synthetic_input_only_similarity_result"] = None
+                st.success(f"Perubahan {selected_input_only_case_id} disimpan di draft input saja.")
+                st.rerun()
+        with input_only_edit_col2:
+            if st.button("Reset Draft Input Saja", use_container_width=True):
+                st.session_state["synthetic_input_only_draft"] = make_input_only_synthetic_draft(df)
+                st.session_state["synthetic_input_only_similarity_result"] = None
+                st.success("Draft input saja dikembalikan ke versi awal.")
+                st.rerun()
+        with input_only_edit_col3:
+            if st.button("Buat 700 Input Berikutnya", use_container_width=True):
+                next_input_only = generate_synthetic_ats_cases(
+                    total_cases=700,
+                    start_number=input_only_next_start,
+                )
+                next_input_only["instruction_ats"] = ""
+                next_input_only["output_ats"] = ""
+                next_input_only["validator"] = ""
+                next_input_only["status"] = ""
+                st.session_state["synthetic_input_only_draft"] = next_input_only
+                st.session_state["synthetic_input_only_similarity_result"] = None
+                st.success("Draft 700 input berikutnya dibuat dengan ID lanjutan.")
+                st.rerun()
+
+        st.dataframe(
+            input_only_preview[
+                [
+                    "synthetic_case_id",
+                    "synthetic_ats_level",
+                    "synthetic_ats_category",
+                    "input",
+                    "instruction_ats",
+                    "output_ats",
+                    "validator",
+                    "status",
+                ]
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        input_only_similarity_col1, input_only_similarity_col2 = st.columns([1, 2])
+        with input_only_similarity_col1:
+            if st.button("Cek Similarity Input Saja", use_container_width=True):
+                st.session_state["synthetic_input_only_similarity_result"] = validate_synthetic_similarity(
+                    st.session_state["synthetic_input_only_draft"],
+                    df,
+                )
+                st.rerun()
+        with input_only_similarity_col2:
+            st.caption(
+                f"Ambang similarity: {SYNTHETIC_SIMILARITY_THRESHOLD:.2f}. "
+                "Input yang terlalu mirip harus diedit sebelum disimpan."
+            )
+
+        input_only_similarity_result = st.session_state["synthetic_input_only_similarity_result"]
+        input_only_has_similarity_problem = False
+        if input_only_similarity_result is None:
+            st.warning("Cek similarity input saja belum dijalankan untuk draft terbaru.")
+            input_only_has_similarity_problem = True
+        else:
+            input_only_duplicate_pairs = input_only_similarity_result["duplicate_pairs"]
+            input_only_existing_pairs = input_only_similarity_result["existing_pairs"]
+            input_only_has_similarity_problem = bool(input_only_duplicate_pairs or input_only_existing_pairs)
+            if input_only_duplicate_pairs:
+                st.error("Ada input sintetis yang terlalu mirip satu sama lain.")
+                st.dataframe(
+                    pd.DataFrame(input_only_duplicate_pairs).drop(columns=["input_1", "input_2"]),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            if input_only_existing_pairs:
+                st.error("Ada input sintetis yang terlalu mirip dengan input existing.")
+                st.dataframe(
+                    pd.DataFrame(input_only_existing_pairs).drop(columns=["input_sintetis", "input_existing"]),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            if not input_only_has_similarity_problem:
+                st.success("Similarity input saja aman.")
+
+        confirm_input_only_append = st.checkbox(
+            "Saya sudah meninjau input sintetis dan yakin ingin menyimpannya ke Google Sheet.",
+            key="confirm_input_only_append",
+        )
+        if confirm_input_only_append and input_only_has_similarity_problem:
+            st.warning("Selesaikan pengecekan similarity input saja sebelum menyimpan.")
+
+        if st.button(
+            "Simpan 700 Input Saja ke Google Sheet",
+            type="primary",
+            use_container_width=True,
+            disabled=not confirm_input_only_append or input_only_has_similarity_problem,
+        ):
+            saved_count, total_rows_after = append_synthetic_ats_cases(
+                total_cases=700,
+                synthetic_data=st.session_state["synthetic_input_only_draft"],
+                input_only=True,
+            )
+            if saved_count:
+                st.success(
+                    f"Berhasil menyimpan {saved_count} input sintetis. "
+                    f"Total baris sheet sekarang {total_rows_after}."
+                )
+                next_input_only = generate_synthetic_ats_cases(
+                    total_cases=700,
+                    start_number=input_only_next_start,
+                )
+                next_input_only["instruction_ats"] = ""
+                next_input_only["output_ats"] = ""
+                next_input_only["validator"] = ""
+                next_input_only["status"] = ""
+                st.session_state["synthetic_input_only_draft"] = next_input_only
+                st.session_state["synthetic_input_only_similarity_result"] = None
+                st.rerun()
+            else:
+                st.info("Tidak ada input baru yang disimpan; semua ID/input sudah sama atau terduplikasi.")
 
 if is_synthetic_only_admin:
     st.stop()
