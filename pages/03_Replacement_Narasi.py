@@ -19,6 +19,7 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 DELIMITER_TEXT = "----- INI PEMBATAS SAJA -----"
 WORKSHEET_NAME = "Sheet1"
 MAX_SHEET_CELL_CHARS = 50000
+LOAD_DATA_TTL_SECONDS = 20
 BASE_COLUMNS = ["instruction_ats", "input", "output_ats", "validator", "status"]
 PROTECTED_LABELING_COLUMNS = {"instruction_ats", "output_ats", "validator", "status"}
 REPLACEMENT_COLUMNS = [
@@ -134,14 +135,23 @@ def prepare_sheet_data(df):
     return sheet_df[ordered_cols]
 
 
-@st.cache_data(ttl=0)
+@st.cache_data(ttl=LOAD_DATA_TTL_SECONDS)
+def read_sheet_for_display():
+    return conn.read(worksheet=WORKSHEET_NAME, ttl=0)
+
+
+def clear_display_sheet_cache():
+    read_sheet_for_display.clear()
+
+
 def load_data():
     last_error = None
     for _ in range(3):
         try:
-            df = conn.read(worksheet=WORKSHEET_NAME, ttl=0)
+            df = read_sheet_for_display()
             if df is not None and not df.empty:
                 return df
+            clear_display_sheet_cache()
         except Exception as e:
             last_error = e
         time.sleep(0.5)
@@ -212,8 +222,7 @@ def update_rows(df, changed_indices, changed_columns, expected_values=None):
                 changed_indices,
                 changed_columns,
             )
-            load_data.clear()
-            st.cache_data.clear()
+            clear_display_sheet_cache()
             return True
     except Exception as e:
         st.error(f"Gagal menyimpan ke Google Sheet: {e}")

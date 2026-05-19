@@ -1,11 +1,14 @@
 import math
 import re
+import time
 
 import streamlit as st
 
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 MAX_VALUE_RANGES_PER_BATCH = 500
+SHEETS_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+SHEETS_RETRY_DELAYS = [1, 2, 4, 8]
 
 
 def normalize_cell_for_sheet(value):
@@ -119,12 +122,44 @@ def get_spreadsheet_id():
     return match.group(1) if match else spreadsheet_id
 
 
+def get_google_api_status_code(error):
+    response = getattr(error, "resp", None)
+    status = getattr(response, "status", None)
+    try:
+        return int(status)
+    except (TypeError, ValueError):
+        return None
+
+
+def execute_google_request_with_retry(request):
+    last_error = None
+    for attempt_index, delay in enumerate([0] + SHEETS_RETRY_DELAYS):
+        if delay:
+            time.sleep(delay)
+        try:
+            return request().execute()
+        except Exception as exc:
+            last_error = exc
+            status_code = get_google_api_status_code(exc)
+            if (
+                status_code not in SHEETS_RETRYABLE_STATUS_CODES
+                or attempt_index >= len(SHEETS_RETRY_DELAYS)
+            ):
+                raise
+
+    raise last_error
+
+
+@st.cache_data(ttl=300)
 def get_sheet_headers(worksheet):
     service = get_sheets_values_service()
-    result = service.get(
-        spreadsheetId=get_spreadsheet_id(),
-        range=f"{quote_worksheet_name(worksheet)}!1:1",
-    ).execute()
+    spreadsheet_id = get_spreadsheet_id()
+    result = execute_google_request_with_retry(
+        lambda: service.get(
+            spreadsheetId=spreadsheet_id,
+            range=f"{quote_worksheet_name(worksheet)}!1:1",
+        )
+    )
     return result.get("values", [[]])[0]
 
 
@@ -136,12 +171,17 @@ def ensure_sheet_headers(worksheet, required_columns):
 
     headers = headers + missing_columns
     end_col = column_index_to_letter(len(headers))
-    get_sheets_values_service().update(
-        spreadsheetId=get_spreadsheet_id(),
-        range=f"{quote_worksheet_name(worksheet)}!A1:{end_col}1",
-        valueInputOption="USER_ENTERED",
-        body={"values": [headers]},
-    ).execute()
+    service = get_sheets_values_service()
+    spreadsheet_id = get_spreadsheet_id()
+    execute_google_request_with_retry(
+        lambda: service.update(
+            spreadsheetId=spreadsheet_id,
+            range=f"{quote_worksheet_name(worksheet)}!A1:{end_col}1",
+            valueInputOption="USER_ENTERED",
+            body={"values": [headers]},
+        )
+    )
+    get_sheet_headers.clear()
     return headers
 
 
@@ -173,13 +213,15 @@ def update_sheet_cells(worksheet, data, row_indices, columns):
     service = get_sheets_values_service()
     spreadsheet_id = get_spreadsheet_id()
     for start in range(0, len(value_ranges), MAX_VALUE_RANGES_PER_BATCH):
-        service.batchUpdate(
-            spreadsheetId=spreadsheet_id,
-            body={
-                "valueInputOption": "USER_ENTERED",
-                "data": value_ranges[start:start + MAX_VALUE_RANGES_PER_BATCH],
-            },
-        ).execute()
+        execute_google_request_with_retry(
+            lambda start=start: service.batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body={
+                    "valueInputOption": "USER_ENTERED",
+                    "data": value_ranges[start:start + MAX_VALUE_RANGES_PER_BATCH],
+                },
+            )
+        )
 
 
 def is_missing_service_account_error(error):
@@ -211,10 +253,14 @@ def append_sheet_rows(worksheet, data):
     for _, row in data.iterrows():
         rows.append([normalize_cell_for_sheet(row.get(column, "")) for column in headers])
 
-    get_sheets_values_service().append(
-        spreadsheetId=get_spreadsheet_id(),
-        range=f"{quote_worksheet_name(worksheet)}!A1",
-        valueInputOption="USER_ENTERED",
-        insertDataOption="INSERT_ROWS",
-        body={"values": rows},
-    ).execute()
+    service = get_sheets_values_service()
+    spreadsheet_id = get_spreadsheet_id()
+    execute_google_request_with_retry(
+        lambda: service.append(
+            spreadsheetId=spreadsheet_id,
+            range=f"{quote_worksheet_name(worksheet)}!A1",
+            valueInputOption="USER_ENTERED",
+            insertDataOption="INSERT_ROWS",
+            body={"values": rows},
+        )
+    )

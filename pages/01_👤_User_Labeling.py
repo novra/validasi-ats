@@ -115,6 +115,7 @@ SHEET_COLUMNS = ['instruction_ats', 'input', 'output_ats', 'validator', 'status'
 MIN_NONEMPTY_INPUT_ROWS = 1
 MAX_SHEET_CELL_CHARS = 50000
 LENGTH_LIMIT_COLUMNS = ['instruction_ats', 'output_ats']
+LOAD_DATA_TTL_SECONDS = 20
 
 def normalize_cell(value):
     if pd.isna(value):
@@ -194,7 +195,7 @@ def get_available_data_mask(data):
         & (data['status'] == '')
     )
 
-@st.cache_data(ttl=0)
+@st.cache_data(ttl=LOAD_DATA_TTL_SECONDS)
 def load_data():
     last_error = None
     for _ in range(3):
@@ -324,9 +325,8 @@ def update_data_unlocked(df, changed_indices=None, changed_columns=None, expecte
 
         update_sheet_cells_with_full_update_fallback(conn, "Sheet1", sheet_data, changed_indices, changed_columns)
         st.session_state['loaded_sheet_rows'] = len(sheet_data)
-        # Clear cache untuk force reload data
+        # Clear cache data utama agar tampilan mengambil nilai terbaru setelah write.
         load_data.clear()
-        st.cache_data.clear()
         return True
     except Exception as e:
         if show_errors:
@@ -369,7 +369,6 @@ def claim_new_tasks(batch_size):
         else:
             st.warning("Tugas yang tersedia baru saja berubah. Silakan klik Ambil Tugas Baru lagi.")
             load_data.clear()
-            st.cache_data.clear()
             return 0
 
         verified_df = conn.read(worksheet="Sheet1", ttl=0)
@@ -388,7 +387,6 @@ def claim_new_tasks(batch_size):
         if verified_count != len(available_indices):
             st.error("Sebagian tugas gagal dikunci karena ada update bersamaan. Silakan ambil ulang.")
             load_data.clear()
-            st.cache_data.clear()
             return 0
 
         return verified_count

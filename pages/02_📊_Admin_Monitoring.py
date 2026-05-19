@@ -37,6 +37,7 @@ GEMINI_RETRY_DELAYS = [15, 45, 90]
 GEMINI_INTER_REQUEST_DELAY_SECONDS = 6
 SYNTHETIC_FULL_TOTAL = 700
 SYNTHETIC_INPUT_ONLY_TOTAL = 50
+LOAD_DATA_TTL_SECONDS = 20
 
 def normalize_cell(value):
     if pd.isna(value):
@@ -67,8 +68,31 @@ def read_sheet_with_retry(attempts=3, delay_seconds=0.5):
 
     return last_df, last_error
 
+
+@st.cache_data(ttl=LOAD_DATA_TTL_SECONDS)
+def read_sheet_for_display():
+    return conn.read(worksheet="Sheet1", ttl=0)
+
+
+def clear_display_sheet_cache():
+    read_sheet_for_display.clear()
+
+
 def load_data():
-    last_df, last_error = read_sheet_with_retry()
+    last_error = None
+    last_df = None
+
+    for _ in range(3):
+        try:
+            last_df = read_sheet_for_display()
+            if last_df is not None and not last_df.empty:
+                remember_loaded_sheet(last_df)
+                return last_df
+            clear_display_sheet_cache()
+        except Exception as e:
+            last_error = e
+        time.sleep(0.5)
+
     if last_df is not None and not last_df.empty:
         remember_loaded_sheet(last_df)
         return last_df
@@ -214,6 +238,8 @@ def update_data_unlocked(df, changed_indices=None, changed_columns=None, expecte
 
         update_sheet_cells_with_full_update_fallback(conn, "Sheet1", sheet_data, changed_indices, changed_columns)
         st.session_state['admin_loaded_sheet_rows'] = len(sheet_data)
+        remember_loaded_sheet(sheet_data)
+        clear_display_sheet_cache()
         return True
     except Exception as e:
         st.error(f"Gagal update Google Sheet: {e}")
@@ -297,6 +323,7 @@ def replace_problem_inputs(selected_indices, replacement_input, expected_values)
             )
             st.session_state['admin_loaded_sheet_rows'] = len(latest_data)
             remember_loaded_sheet(latest_data)
+            clear_display_sheet_cache()
 
             verified_df, verified_error = read_sheet_with_retry()
             if verified_df is None or verified_df.empty:
@@ -1187,6 +1214,7 @@ def append_synthetic_ats_cases(
 
             st.session_state['admin_loaded_sheet_rows'] = len(updated_data)
             remember_loaded_sheet(updated_data)
+            clear_display_sheet_cache()
             return len(missing_data) + updated_count, len(updated_data)
     except Exception as e:
         st.error(f"Gagal menambahkan data sintetis ke Google Sheet: {e}")
