@@ -538,6 +538,56 @@ def learn_existing_input_style_with_gemini(input_examples, api_key):
         raise ValueError("Hasil pembelajaran gaya input Gemini kosong.")
     return learned_text
 
+def learn_existing_input_style_locally(input_examples):
+    if not input_examples:
+        raise ValueError("Tidak ada input existing yang bersih untuk dipelajari.")
+
+    text_series = pd.Series(input_examples).fillna("").astype(str)
+    lengths = text_series.map(len)
+    common_terms = []
+    clinical_keywords = [
+        "IGD", "triase", "keluhan", "tanda vital", "GCS", "TD", "HR", "RR", "SpO2",
+        "riwayat", "nyeri", "sesak", "demam", "muntah", "diare", "perdarahan",
+        "lemas", "pusing", "batuk", "trauma", "jatuh", "kesadaran",
+    ]
+    lower_blob = " ".join(text_series.str.lower().tolist())
+    for keyword in clinical_keywords:
+        if keyword.lower() in lower_blob:
+            common_terms.append(keyword)
+
+    avg_length = int(lengths.mean()) if not lengths.empty else 0
+    min_length = int(lengths.min()) if not lengths.empty else 0
+    max_length = int(lengths.max()) if not lengths.empty else 0
+    paragraph_style = "beberapa paragraf pendek" if text_series.str.contains(r"\n\s*\n", regex=True).mean() >= 0.25 else "satu paragraf naratif atau paragraf pendek"
+
+    return (
+        "POLA_NARASI_INPUT:\n"
+        f"- Input existing cenderung memakai {paragraph_style}.\n"
+        f"- Panjang narasi berkisar sekitar {min_length}-{max_length} karakter, rata-rata {avg_length} karakter.\n"
+        "- Narasi perlu memuat cara datang, kronologi keluhan, gejala penyerta, kondisi umum, riwayat, observasi triase, dan tanda vital.\n"
+        f"- Istilah klinis yang tampak relevan untuk dipertahankan: {', '.join(common_terms[:12]) or 'keluhan, tanda vital, riwayat, observasi triase'}.\n\n"
+        "ATURAN_VARIASI:\n"
+        "- Buat kasus baru yang berbeda secara klinis, bukan parafrase dari input existing.\n"
+        "- Variasikan usia, jenis kelamin, cara datang, durasi keluhan, gejala penyerta, riwayat penyakit, tanda vital, dan observasi awal.\n"
+        "- Hindari memakai urutan kalimat yang sama untuk semua kasus.\n"
+        "- Pertahankan konsistensi antara level ATS target dan derajat kegawatan narasi.\n"
+        "- Gunakan tanda vital yang masuk akal untuk setiap level ATS.\n"
+        "- Buat detail yang cukup untuk pelabel menentukan prioritas, tetapi jangan mengisi output/label ATS.\n\n"
+        "HAL_YANG_DIHINDARI:\n"
+        "- Jangan menyalin ID, kronologi, frasa panjang, kombinasi gejala, atau tanda vital dari existing.\n"
+        "- Hindari frasa repetitif seperti pembukaan dan penutup yang identik di banyak kasus.\n"
+        "- Hindari kasus yang hanya berbeda umur atau jenis kelamin tetapi substansi klinisnya sama."
+    )
+
+def learn_existing_input_style(input_examples, api_key):
+    try:
+        return learn_existing_input_style_with_gemini(input_examples, api_key), "Gemini"
+    except requests.HTTPError as e:
+        status_code = e.response.status_code if e.response is not None else None
+        if status_code != 429:
+            raise
+        return learn_existing_input_style_locally(input_examples), "fallback lokal karena Gemini rate limited"
+
 def post_gemini_generate_content(api_key, prompt, generation_config, timeout=90):
     last_error = None
     for attempt_index in range(len(GEMINI_RETRY_DELAYS) + 1):
@@ -1551,15 +1601,16 @@ if can_manage_synthetic_data:
         with learn_input_col1:
             if st.button("Pelajari Gaya Input Existing", use_container_width=True):
                 try:
-                    st.session_state["synthetic_input_learning_notes"] = learn_existing_input_style_with_gemini(
+                    learned_input_notes, learning_source = learn_existing_input_style(
                         clean_input_examples,
                         gemini_api_key,
                     )
+                    st.session_state["synthetic_input_learning_notes"] = learned_input_notes
                     st.session_state["synthetic_input_only_similarity_result"] = None
-                    st.success("Gemini selesai mempelajari gaya narasi input existing.")
+                    st.success(f"Pembelajaran gaya narasi input selesai memakai {learning_source}.")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Gagal mempelajari gaya input existing dengan Gemini: {e}")
+                    st.error(f"Gagal mempelajari gaya input existing: {e}")
         with learn_input_col2:
             if st.session_state["synthetic_input_learning_notes"]:
                 st.success("Panduan gaya input existing sudah tersedia untuk variasi Gemini.")
