@@ -656,6 +656,107 @@ def diversify_input_only_with_gemini(draft, api_key, batch_size=1, input_learnin
 
     return pd.DataFrame(varied_rows).reset_index(drop=True)
 
+def parse_gemini_input_cases(result_text):
+    parsed_inputs = {}
+    current_id = None
+    current_lines = []
+    for line in result_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("ID:"):
+            if current_id and current_lines:
+                parsed_inputs[current_id] = "\n".join(current_lines).strip()
+            current_id = stripped.replace("ID:", "", 1).strip()
+            current_lines = []
+        elif stripped.startswith("INPUT:"):
+            current_lines.append(stripped.replace("INPUT:", "", 1).strip())
+        elif current_id:
+            current_lines.append(line)
+    if current_id and current_lines:
+        parsed_inputs[current_id] = "\n".join(current_lines).strip()
+    return parsed_inputs
+
+def generate_input_only_cases_with_gemini(existing_data, api_key, input_learning_notes="", total_cases=SYNTHETIC_INPUT_ONLY_TOTAL):
+    if not api_key:
+        raise ValueError("API key Gemini belum ditemukan dari secret GEMINI_API_KEY.")
+
+    cases_per_level = total_cases // len(ATS_LEVELS)
+    start_number = get_next_synthetic_start_number(existing_data)
+    clean_examples = get_clean_input_examples(existing_data, limit=20)
+    example_text = "\n\n".join(
+        f"EXISTING INPUT {index + 1}:\n{example[:1000]}"
+        for index, example in enumerate(clean_examples)
+    )
+    generated_rows = []
+    next_number = start_number
+
+    for level_key, level_color, ats_category in ATS_LEVELS:
+        target_ids = [
+            f"ATS-SYN-{case_number:04d}"
+            for case_number in range(next_number, next_number + cases_per_level)
+        ]
+        next_number += cases_per_level
+        prompt = (
+            "Anda membuat data input sintetis triase IGD baru dalam bahasa Indonesia. "
+            "Pelajari gaya data existing, tetapi buat kasus yang benar-benar berbeda secara klinis dan naratif. "
+            "Jangan menyalin kasus, frasa khas, kronologi, kombinasi tanda vital, atau susunan kalimat dari data existing. "
+            "Setiap input harus berupa narasi gamblang dan cukup detail: cara datang, kronologi, keluhan utama, "
+            "gejala penyerta, kondisi umum, riwayat, observasi triase, dan tanda vital. "
+            "Jangan isi instruction_ats, output_ats, validator, atau status.\n\n"
+            f"Panduan gaya input existing:\n{input_learning_notes or 'Gunakan gaya narasi IGD natural, detail, dan tidak repetitif.'}\n\n"
+            f"Contoh existing yang harus dipelajari gayanya tetapi tidak boleh disalin:\n{example_text}\n\n"
+            f"Buat {cases_per_level} kasus baru untuk target {ats_category}/{level_color}. "
+            "Pastikan variasi tinggi antar kasus: keluhan, usia, kronologi, gejala penyerta, riwayat, cara datang, "
+            "dan tanda vital tidak berpola sama. Gunakan ID berikut persis:\n"
+            f"{', '.join(target_ids)}\n\n"
+            "Kembalikan hanya dengan format berulang:\n"
+            "ID: ATS-SYN-xxxx\n"
+            "INPUT: narasi kasus baru\n"
+        )
+        response = post_gemini_generate_content(
+            api_key,
+            prompt,
+            {
+                "temperature": 0.95,
+                "maxOutputTokens": 7000,
+            },
+            timeout=120,
+        )
+        payload = response.json()
+        parts = payload.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+        parsed_inputs = parse_gemini_input_cases(
+            "\n".join(part.get("text", "") for part in parts).strip()
+        )
+
+        local_fallback = generate_synthetic_ats_cases(
+            total_cases=SYNTHETIC_FULL_TOTAL,
+            seed=20260519 + next_number,
+            start_number=900000 + next_number,
+        )
+        fallback_candidates = local_fallback[local_fallback["synthetic_ats_level"] == level_color].reset_index(drop=True)
+
+        for index, synthetic_id in enumerate(target_ids):
+            input_text = parsed_inputs.get(synthetic_id, "").strip()
+            if not input_text and not fallback_candidates.empty:
+                fallback_row = fallback_candidates.iloc[index % len(fallback_candidates)]
+                input_text = fallback_row["input"].replace(fallback_row["synthetic_case_id"], synthetic_id)
+
+            generated_rows.append(
+                {
+                    "instruction_ats": "",
+                    "input": input_text,
+                    "output_ats": "",
+                    "validator": "",
+                    "status": "",
+                    "synthetic_case_id": synthetic_id,
+                    "synthetic_ats_level": level_color,
+                    "synthetic_ats_category": ats_category,
+                }
+            )
+
+        time.sleep(GEMINI_INTER_REQUEST_DELAY_SECONDS)
+
+    return pd.DataFrame(generated_rows)
+
 def get_problematic_similarity_case_ids(similarity_result):
     if not similarity_result:
         return []
@@ -1539,6 +1640,32 @@ if can_manage_synthetic_data:
                 st.session_state["synthetic_input_only_similarity_result"] = None
                 st.success("Draft 50 input berikutnya dibuat dengan ID lanjutan.")
                 st.rerun()
+
+        generate_gemini_col1, generate_gemini_col2 = st.columns([1, 2])
+        with generate_gemini_col1:
+            if st.button(
+                "Generate 50 Input Baru dengan Gemini",
+                use_container_width=True,
+                disabled=not st.session_state["synthetic_input_learning_notes"],
+            ):
+                try:
+                    st.session_state["synthetic_input_only_draft"] = generate_input_only_cases_with_gemini(
+                        df,
+                        gemini_api_key,
+                        input_learning_notes=st.session_state["synthetic_input_learning_notes"],
+                        total_cases=SYNTHETIC_INPUT_ONLY_TOTAL,
+                    )
+                    st.session_state["synthetic_input_only_similarity_result"] = None
+                    st.success("Gemini berhasil membuat 50 input baru dari gaya data existing.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Gagal generate 50 input baru dengan Gemini: {e}")
+        with generate_gemini_col2:
+            st.caption(
+                "Pelajari Gaya Input Existing terlebih dahulu. Gemini akan membuat 10 input per level ATS "
+                "dengan ID lanjutan dan instruksi agar kasus berbeda dari data existing. Setelah generate, "
+                "tetap jalankan Cek Similarity Input Saja sebelum menyimpan."
+            )
 
         problematic_input_count = len(
             get_problematic_similarity_case_ids(st.session_state["synthetic_input_only_similarity_result"])
