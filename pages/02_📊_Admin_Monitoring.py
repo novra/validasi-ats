@@ -11,6 +11,7 @@ import re
 import time
 from auth_config import AUTHORIZED_USERS, ADMIN_CREDENTIALS, AUTHORIZED_ADMINS, REPLACEMENT_ADMINS, SYNTHETIC_DATA_ADMINS
 from sheet_lock import get_sheet_write_lock
+from sheet_range_update import append_sheet_rows, update_sheet_cells
 from synthetic_ats_data import ATS_LEVELS, generate_synthetic_ats_cases, get_synthetic_balance_summary
 
 # --- KONFIGURASI HALAMAN ---
@@ -206,7 +207,7 @@ def update_data_unlocked(df, changed_indices=None, changed_columns=None, expecte
             )
             return False
 
-        conn.update(worksheet="Sheet1", data=sheet_data)
+        update_sheet_cells("Sheet1", sheet_data, changed_indices, changed_columns)
         st.session_state['admin_loaded_sheet_rows'] = len(sheet_data)
         return True
     except Exception as e:
@@ -282,7 +283,12 @@ def replace_problem_inputs(selected_indices, replacement_input, expected_values)
                 )
                 return False
 
-            conn.update(worksheet="Sheet1", data=latest_data)
+            update_sheet_cells(
+                "Sheet1",
+                latest_data,
+                selected_indices,
+                ['input', 'instruction_ats', 'output_ats', 'status'],
+            )
             st.session_state['admin_loaded_sheet_rows'] = len(latest_data)
             remember_loaded_sheet(latest_data)
 
@@ -1116,6 +1122,7 @@ def append_synthetic_ats_cases(
             )
 
             updated_count = 0
+            updated_indices = []
             append_rows = []
             latest_ids = latest_data["synthetic_case_id"].fillna("").astype(str).str.strip()
             protected_existing_rows = []
@@ -1135,6 +1142,7 @@ def append_synthetic_ats_cases(
                     for col in synthetic_data.columns:
                         latest_data.at[row_index, col] = row.get(col, "")
                     updated_count += 1
+                    updated_indices.append(row_index)
                 elif input_value not in existing_inputs:
                     append_rows.append(row)
 
@@ -1150,9 +1158,16 @@ def append_synthetic_ats_cases(
             if missing_data.empty and updated_count == 0:
                 return 0, len(latest_data)
 
+            update_columns = list(synthetic_data.columns)
+            if updated_count:
+                update_sheet_cells("Sheet1", latest_data, sorted(set(updated_indices)), update_columns)
+
+            if not missing_data.empty:
+                missing_data = prepare_sheet_data(missing_data.fillna(""))
+                append_sheet_rows("Sheet1", missing_data)
+
             updated_data = pd.concat([latest_data, missing_data], ignore_index=True, sort=False).fillna("")
             updated_data = prepare_sheet_data(updated_data)
-            conn.update(worksheet="Sheet1", data=updated_data)
             st.session_state['admin_loaded_sheet_rows'] = len(updated_data)
             remember_loaded_sheet(updated_data)
             return len(missing_data) + updated_count, len(updated_data)
