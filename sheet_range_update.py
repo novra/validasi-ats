@@ -41,6 +41,47 @@ def get_gsheets_secret_config():
         raise RuntimeError("Konfigurasi connections.gsheets tidak ditemukan di Streamlit secrets.") from exc
 
 
+def as_plain_dict(value):
+    if value is None:
+        return {}
+    try:
+        return dict(value)
+    except Exception:
+        return {}
+
+
+def get_nested_secret(*keys):
+    current = st.secrets
+    for key in keys:
+        try:
+            current = current[key]
+        except Exception:
+            return {}
+    return as_plain_dict(current)
+
+
+def get_service_account_info(config):
+    candidate_paths = [
+        ("connections", "gsheets", "gcp_service_account"),
+        ("connections", "gsheets", "service_account"),
+        ("connections", "gsheets", "credentials"),
+        ("gcp_service_account",),
+        ("google_service_account",),
+        ("service_account",),
+    ]
+
+    for path in candidate_paths:
+        candidate = get_nested_secret(*path)
+        if candidate.get("type") == "service_account" and candidate.get("client_email"):
+            return candidate
+
+    direct_config = as_plain_dict(config)
+    if direct_config.get("type") == "service_account" and direct_config.get("client_email"):
+        return direct_config
+
+    return {}
+
+
 @st.cache_resource
 def get_sheets_values_service():
     try:
@@ -53,9 +94,13 @@ def get_sheets_values_service():
         ) from exc
 
     config = get_gsheets_secret_config()
-    service_account_info = dict(config.get("gcp_service_account", {}))
+    service_account_info = get_service_account_info(config)
     if not service_account_info:
-        raise RuntimeError("Service account Google Sheets tidak ditemukan di Streamlit secrets.")
+        raise RuntimeError(
+            "Service account Google Sheets tidak ditemukan di Streamlit secrets. "
+            "Untuk update per-row, tambahkan blok [connections.gsheets.gcp_service_account] "
+            "dari JSON service account dan share Google Sheet ke client_email tersebut sebagai Editor."
+        )
 
     credentials = service_account.Credentials.from_service_account_info(
         service_account_info,
@@ -135,6 +180,26 @@ def update_sheet_cells(worksheet, data, row_indices, columns):
                 "data": value_ranges[start:start + MAX_VALUE_RANGES_PER_BATCH],
             },
         ).execute()
+
+
+def is_missing_service_account_error(error):
+    return "Service account Google Sheets tidak ditemukan" in str(error)
+
+
+def update_sheet_cells_with_full_update_fallback(conn, worksheet, data, row_indices, columns):
+    try:
+        update_sheet_cells(worksheet, data, row_indices, columns)
+        return "row"
+    except RuntimeError as exc:
+        if not is_missing_service_account_error(exc):
+            raise
+        st.warning(
+            "Service account untuk update per-row belum tersedia. "
+            "Aplikasi memakai fallback update penuh sementara; tambahkan "
+            "[connections.gsheets.gcp_service_account] agar update aman per-row aktif."
+        )
+        conn.update(worksheet=worksheet, data=data)
+        return "full"
 
 
 def append_sheet_rows(worksheet, data):

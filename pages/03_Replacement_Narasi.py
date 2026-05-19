@@ -9,7 +9,7 @@ from streamlit_gsheets import GSheetsConnection
 
 from auth_config import AUTHORIZED_REPLACEMENT_USERS, REPLACEMENT_USER_CREDENTIALS
 from sheet_lock import get_sheet_write_lock
-from sheet_range_update import update_sheet_cells
+from sheet_range_update import update_sheet_cells_with_full_update_fallback
 
 
 st.set_page_config(layout="wide", page_title="Replacement Narasi")
@@ -205,7 +205,13 @@ def update_rows(df, changed_indices, changed_columns, expected_values=None):
 
         with get_sheet_write_lock():
             sheet_data = merge_update_rows(df, changed_indices, changed_columns, expected_values)
-            update_sheet_cells(WORKSHEET_NAME, sheet_data, changed_indices, changed_columns)
+            update_sheet_cells_with_full_update_fallback(
+                conn,
+                WORKSHEET_NAME,
+                sheet_data,
+                changed_indices,
+                changed_columns,
+            )
             load_data.clear()
             st.cache_data.clear()
             return True

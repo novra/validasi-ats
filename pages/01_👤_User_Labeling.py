@@ -4,7 +4,7 @@ from streamlit_gsheets import GSheetsConnection
 import time
 from auth_config import AUTHORIZED_USERS, USER_CREDENTIALS
 from sheet_lock import get_sheet_write_lock
-from sheet_range_update import update_sheet_cells
+from sheet_range_update import update_sheet_cells_with_full_update_fallback
 
 # --- KONFIGURASI HALAMAN ---
 st.set_page_config(layout="wide", page_title="Online ATS Validator")
@@ -322,7 +322,7 @@ def update_data_unlocked(df, changed_indices=None, changed_columns=None, expecte
                 show_length_violation_error(length_violations)
             return False
 
-        update_sheet_cells("Sheet1", sheet_data, changed_indices, changed_columns)
+        update_sheet_cells_with_full_update_fallback(conn, "Sheet1", sheet_data, changed_indices, changed_columns)
         st.session_state['loaded_sheet_rows'] = len(sheet_data)
         # Clear cache untuk force reload data
         load_data.clear()
