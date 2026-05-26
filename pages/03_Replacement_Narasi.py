@@ -427,6 +427,52 @@ def save_replacement_draft(df, index, row, username, draft_narrative, selected_m
     )
 
 
+def save_replacement_final(df, index, row, username, final_narrative, selected_model, original_input):
+    cleaned_narrative = clean_narrative(final_narrative)
+    if not cleaned_narrative:
+        st.error("Narasi final wajib diisi.")
+        return False
+    if DELIMITER_TEXT in cleaned_narrative:
+        st.error("Narasi final masih mengandung teks pembatas.")
+        return False
+    if len(cleaned_narrative) > MAX_SHEET_CELL_CHARS:
+        st.error(f"Narasi final melebihi {MAX_SHEET_CELL_CHARS:,} karakter.")
+        return False
+
+    expected_values = {
+        "input": {index: normalize_cell(row.get("input"))},
+        "status": {index: "Done"},
+        "replacement_user": {index: username},
+        "replacement_status": {index: normalize_cell(row.get("replacement_status"))},
+        "replacement_original_input": {index: normalize_cell(row.get("replacement_original_input"))},
+    }
+    df.at[index, "input"] = cleaned_narrative
+    df.at[index, "replacement_user"] = username
+    df.at[index, "replacement_status"] = "Done"
+    df.at[index, "replacement_model"] = st.session_state.get(
+        f"replacement_used_model_{index}",
+        selected_model,
+    )
+    df.at[index, "replacement_original_input"] = original_input
+    df.at[index, "replacement_narrative"] = cleaned_narrative
+    df.at[index, "replacement_saved_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    return update_rows(
+        df,
+        [index],
+        [
+            "input",
+            "replacement_user",
+            "replacement_status",
+            "replacement_model",
+            "replacement_original_input",
+            "replacement_narrative",
+            "replacement_saved_at",
+        ],
+        expected_values,
+    )
+
+
 if not st.session_state.get("replacement_logged_in", False):
     st.title("Login Replacement Narasi")
     st.markdown("### Masuk sebagai user replacement")
@@ -548,6 +594,7 @@ for index, row in my_active_df.iterrows():
     generated_key = f"replacement_generated_{index}"
     editor_key = f"replacement_editor_{index}"
     pending_editor_key = f"replacement_editor_pending_{index}"
+    final_confirm_key = f"replacement_final_confirm_{index}"
     notice_key = f"replacement_notice_{index}"
 
     if editor_key not in st.session_state:
@@ -650,41 +697,35 @@ for index, row in my_active_df.iterrows():
             elif len(final_narrative) > MAX_SHEET_CELL_CHARS:
                 st.error(f"Narasi final melebihi {MAX_SHEET_CELL_CHARS:,} karakter.")
             else:
-                expected_values = {
-                    "input": {index: normalize_cell(row.get("input"))},
-                    "status": {index: "Done"},
-                    "replacement_user": {index: username},
-                    "replacement_status": {index: normalize_cell(row.get("replacement_status"))},
-                    "replacement_original_input": {index: normalize_cell(row.get("replacement_original_input"))},
-                }
-                df.at[index, "input"] = final_narrative
-                df.at[index, "replacement_user"] = username
-                df.at[index, "replacement_status"] = "Done"
-                df.at[index, "replacement_model"] = st.session_state.get(
-                    f"replacement_used_model_{index}",
-                    selected_model,
-                )
-                df.at[index, "replacement_original_input"] = original_input
-                df.at[index, "replacement_narrative"] = final_narrative
-                df.at[index, "replacement_saved_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                st.session_state[final_confirm_key] = True
 
-                if update_rows(
+    if st.session_state.get(final_confirm_key):
+        st.warning("data tidak dapat diubah kembali, yakin untuk simpan ?")
+        col_confirm_final, col_cancel_final = st.columns([1, 1], gap="small")
+        with col_confirm_final:
+            if st.button(
+                "Ya, Simpan Final",
+                key=f"confirm_save_replacement_{index}",
+                type="primary",
+                use_container_width=True,
+            ):
+                if save_replacement_final(
                     df,
-                    [index],
-                    [
-                        "input",
-                        "replacement_user",
-                        "replacement_status",
-                        "replacement_model",
-                        "replacement_original_input",
-                        "replacement_narrative",
-                        "replacement_saved_at",
-                    ],
-                    expected_values,
+                    index,
+                    row,
+                    username,
+                    st.session_state.get(editor_key, ""),
+                    selected_model,
+                    original_input,
                 ):
+                    st.session_state.pop(final_confirm_key, None)
                     st.success(f"Data #{index + 1} berhasil disimpan sebagai narasi.")
                     time.sleep(0.5)
                     st.rerun()
+        with col_cancel_final:
+            if st.button("Batal", key=f"cancel_save_replacement_{index}", use_container_width=True):
+                st.session_state.pop(final_confirm_key, None)
+                st.rerun()
 
     with st.expander("Preview metadata", expanded=False):
         st.write(
