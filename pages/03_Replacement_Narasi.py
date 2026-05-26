@@ -170,6 +170,21 @@ def unclaimed_pool_mask(df):
     )
 
 
+def active_replacement_mask(df, username):
+    replacement_status = df["replacement_status"].map(normalize_cell)
+    return (
+        (df["replacement_user"] == username)
+        & (replacement_status != "Done")
+        & (
+            (replacement_status == "Claimed")
+            | (
+                df["input"].str.contains(DELIMITER_TEXT, case=False, na=False, regex=False)
+                & (df["status"] == "Done")
+            )
+        )
+    )
+
+
 def merge_update_rows(pending_df, changed_indices, changed_columns, expected_values=None):
     latest_df = conn.read(worksheet=WORKSHEET_NAME, ttl=0)
     if latest_df is None or latest_df.empty:
@@ -192,7 +207,13 @@ def merge_update_rows(pending_df, changed_indices, changed_columns, expected_val
                 if col not in latest_data.columns:
                     latest_data[col] = ""
                 expected_value = expected_by_row.get(index, "") if isinstance(expected_by_row, dict) else expected_by_row
-                if normalize_cell(latest_data.at[index, col]) != normalize_cell(expected_value):
+                if isinstance(expected_value, (list, tuple, set)):
+                    expected_matches = normalize_cell(latest_data.at[index, col]) in {
+                        normalize_cell(value) for value in expected_value
+                    }
+                else:
+                    expected_matches = normalize_cell(latest_data.at[index, col]) == normalize_cell(expected_value)
+                if not expected_matches:
                     raise ValueError(
                         f"Baris {index + 1} sudah berubah di Google Sheet. Muat ulang halaman sebelum menyimpan."
                     )
@@ -362,6 +383,50 @@ def clean_narrative(text):
     return "\n\n".join(paragraphs)
 
 
+def save_replacement_draft(df, index, row, username, draft_narrative, selected_model):
+    cleaned_narrative = clean_narrative(draft_narrative)
+    if not cleaned_narrative:
+        st.error("Draft narasi wajib diisi sebelum disimpan.")
+        return False
+    if DELIMITER_TEXT in cleaned_narrative:
+        st.error("Draft narasi masih mengandung teks pembatas.")
+        return False
+    if len(cleaned_narrative) > MAX_SHEET_CELL_CHARS:
+        st.error(f"Draft narasi melebihi {MAX_SHEET_CELL_CHARS:,} karakter.")
+        return False
+
+    original_input = normalize_cell(row.get("replacement_original_input")) or normalize_cell(row.get("input"))
+    expected_values = {
+        "input": {index: normalize_cell(row.get("input"))},
+        "replacement_user": {index: [username, ""]},
+        "replacement_status": {index: [normalize_cell(row.get("replacement_status")), "Claimed", ""]},
+        "replacement_original_input": {index: [normalize_cell(row.get("replacement_original_input")), ""]},
+    }
+    df.at[index, "replacement_user"] = username
+    df.at[index, "replacement_status"] = "Claimed"
+    df.at[index, "replacement_model"] = st.session_state.get(
+        f"replacement_used_model_{index}",
+        selected_model,
+    )
+    df.at[index, "replacement_original_input"] = original_input
+    df.at[index, "replacement_narrative"] = cleaned_narrative
+    df.at[index, "replacement_saved_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    return update_rows(
+        df,
+        [index],
+        [
+            "replacement_user",
+            "replacement_status",
+            "replacement_model",
+            "replacement_original_input",
+            "replacement_narrative",
+            "replacement_saved_at",
+        ],
+        expected_values,
+    )
+
+
 if not st.session_state.get("replacement_logged_in", False):
     st.title("Login Replacement Narasi")
     st.markdown("### Masuk sebagai user replacement")
@@ -432,10 +497,7 @@ df = prepare_sheet_data(df)
 
 available_count = len(df[unclaimed_pool_mask(df)])
 my_active_df = df[
-    (df["replacement_user"] == username)
-    & (df["replacement_status"] != "Done")
-    & (df["input"].str.contains(DELIMITER_TEXT, case=False, na=False, regex=False))
-    & (df["status"] == "Done")
+    active_replacement_mask(df, username)
 ].copy()
 my_done_count = len(df[(df["replacement_user"] == username) & (df["replacement_status"] == "Done")])
 all_done_count = len(df[df["replacement_status"] == "Done"])
@@ -451,6 +513,12 @@ with st.sidebar.expander("Pengaturan Model", expanded=True):
     selected_model = custom_model.strip() if model_choice == "Custom model" and custom_model.strip() else model_choice
     temperature = st.slider("Temperature", min_value=0.1, max_value=1.5, value=0.7, step=0.1)
     max_new_tokens = st.slider("Max output tokens", min_value=256, max_value=4096, value=1536, step=128)
+
+auto_save_draft = st.sidebar.toggle(
+    "Auto-save draft",
+    value=True,
+    help="Menyimpan perubahan narasi sebagai draft dengan replacement_status tetap Claimed.",
+)
 
 if not get_secret_value("HUGGINGFACE_API_KEY", "HUGGINGFACE_API_TOKEN", "HF_TOKEN"):
     st.warning(
@@ -516,7 +584,19 @@ for index, row in my_active_df.iterrows():
             placeholder="Generate dari Hugging Face atau tulis narasi final di sini...",
         )
 
-    col_generate, col_copy, col_save = st.columns([1.2, 1, 1.2], gap="small")
+    saved_narrative = normalize_cell(row.get("replacement_narrative"))
+    current_clean_narrative = clean_narrative(st.session_state.get(editor_key, ""))
+    if (
+        auto_save_draft
+        and current_clean_narrative
+        and current_clean_narrative != saved_narrative
+        and DELIMITER_TEXT not in current_clean_narrative
+    ):
+        if save_replacement_draft(df, index, row, username, current_clean_narrative, selected_model):
+            st.toast(f"Draft Data #{index + 1} tersimpan.", icon="✅")
+            row = df.loc[index]
+
+    col_generate, col_copy, col_draft, col_save = st.columns([1.2, 1, 1.1, 1.2], gap="small")
     with col_generate:
         if st.button("Generate Narasi", key=f"generate_{index}", type="primary", use_container_width=True):
             with st.spinner(f"Memanggil model {selected_model}..."):
@@ -552,6 +632,13 @@ for index, row in my_active_df.iterrows():
         if st.button("Bersihkan Pembatas", key=f"clean_{index}", use_container_width=True):
             st.session_state[pending_editor_key] = clean_narrative(narrative_value)
             st.rerun()
+
+    with col_draft:
+        if st.button("Simpan Draft", key=f"save_replacement_draft_{index}", use_container_width=True):
+            if save_replacement_draft(df, index, row, username, st.session_state.get(editor_key, ""), selected_model):
+                st.success(f"Draft Data #{index + 1} tersimpan. Status tetap Claimed dan masih menjadi tugas aktif.")
+                time.sleep(0.3)
+                st.rerun()
 
     with col_save:
         if st.button("Simpan Final", key=f"save_replacement_{index}", use_container_width=True):
