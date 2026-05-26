@@ -5,6 +5,7 @@ from datetime import datetime
 import pandas as pd
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 from streamlit_gsheets import GSheetsConnection
 
 from auth_config import AUTHORIZED_REPLACEMENT_USERS, REPLACEMENT_USER_CREDENTIALS
@@ -66,6 +67,44 @@ st.markdown(
 """,
     unsafe_allow_html=True,
 )
+
+
+def apply_blue_final_save_button_style():
+    components.html(
+        """
+        <script>
+        const blueLabels = new Set(["Simpan Final", "Ya, Simpan Final"]);
+        const applyStyle = () => {
+            const buttons = window.parent.document.querySelectorAll("button");
+            buttons.forEach((button) => {
+                const label = button.innerText.trim();
+                if (!blueLabels.has(label)) {
+                    return;
+                }
+                button.style.backgroundColor = "#2563eb";
+                button.style.borderColor = "#2563eb";
+                button.style.color = "#ffffff";
+                button.style.boxShadow = "none";
+                if (button.dataset.finalSaveBlueStyled !== "true") {
+                    button.dataset.finalSaveBlueStyled = "true";
+                    button.addEventListener("mouseenter", () => {
+                        button.style.backgroundColor = "#1d4ed8";
+                        button.style.borderColor = "#1d4ed8";
+                    });
+                    button.addEventListener("mouseleave", () => {
+                        button.style.backgroundColor = "#2563eb";
+                        button.style.borderColor = "#2563eb";
+                    });
+                }
+            });
+        };
+        applyStyle();
+        const intervalId = window.setInterval(applyStyle, 250);
+        window.setTimeout(() => window.clearInterval(intervalId), 3000);
+        </script>
+        """,
+        height=0,
+    )
 
 
 def normalize_cell(value):
@@ -744,3 +783,5 @@ for index, row in my_active_df.iterrows():
         )
 
     st.divider()
+
+apply_blue_final_save_button_style()
