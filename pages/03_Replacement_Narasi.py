@@ -688,7 +688,12 @@ for index, row in my_active_df.iterrows():
                 st.rerun()
 
     with col_save:
-        if st.button("Simpan Final", key=f"save_replacement_{index}", use_container_width=True):
+        if st.button(
+            "Simpan Final",
+            key=f"save_replacement_{index}",
+            type="primary",
+            use_container_width=True,
+        ):
             final_narrative = clean_narrative(st.session_state.get(editor_key, ""))
             if not final_narrative:
                 st.error("Narasi final wajib diisi.")
